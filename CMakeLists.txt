@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.10 FATAL_ERROR)
 
-set(CUDA_PATH "/usr/local/cuda-11.4")
+set(CUDA_PATH "/usr/local/cuda-11.8")
 set(CMAKE_CUDA_COMPILER "${CUDA_PATH}/bin/nvcc")
 set(CMAKE_BUILD_TYPE Debug)  # 控制编译类型
 project(cudaCode LANGUAGES CXX CUDA)
