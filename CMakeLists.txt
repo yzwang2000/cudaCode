@@ -55,4 +55,4 @@ link_directories(
   ${COMMON_LIB_DIRS}
 )
 
-add_executable(main main.cu)
+add_executable(main ./reduce/reduce_v1)
