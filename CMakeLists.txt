@@ -55,4 +55,5 @@ link_directories(
   ${COMMON_LIB_DIRS}
 )
 
-add_executable(main ./reduce/reduce_v1)
+# add_executable(main ./reduce/reduce_v1.cu)
+add_executable(main ./elementwise/vectorized_access.cu)
