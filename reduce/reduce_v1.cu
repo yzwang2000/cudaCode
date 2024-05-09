@@ -17,6 +17,7 @@ __global__ void Kernel_A(int *d_s, int *d_o)
 
     // 每个线程先将负责的部分的数据规约到自己的寄存器中
     int sum = 0;
+    #pragma unroll
     for(int i=tid; i<num_per_block; i+=blockDim.x)
     {
         sum += b_s[i];
@@ -28,6 +29,7 @@ __global__ void Kernel_A(int *d_s, int *d_o)
     __syncthreads();
 
     // 这样规约的好处, 1) 避免了线程束的分歧 2) 不存在 blank 冲突 3) 最后一个 warp 内不需要同步, 避免了同步造成的影响
+    #pragma unroll
     for(int s=blockDim.x/2; s>16; s>>=1)
     {
         if(tid<s)
@@ -109,6 +111,7 @@ __global__ void Kernel_B(int *d_s, int *d_o)
 
     // 每个线程先将负责的部分的数据规约到自己的寄存器中
     int sum = 0;
+    #pragma unroll
     for(int i=tid; i<num_per_block; i+=blockDim.x)
     {
         sum += b_s[i];

@@ -55,5 +55,6 @@ link_directories(
   ${COMMON_LIB_DIRS}
 )
 
-# add_executable(main ./reduce/reduce_v1.cu)
-add_executable(main ./elementwise/vectorized_access.cu)
+add_executable(main ./reduce/reduce_v1.cu)
+# add_executable(main ./gemm/gemm_v1.cu)
+target_link_libraries(main PUBLIC cublas)

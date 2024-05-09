@@ -130,6 +130,8 @@ __global__ void Kernel_B(int *d_s, int *d_o)
 
 ## PTX 与 SASS 的区别
 * CUDA 的汇编语言分成两种, 一种是 Parallel Thread Execution(PTX), 另一种是 Streaming Assembly(SASS)。SASS 指令集与 GPU 架构是有直接的联系的, 是机器码的指令集合, 编译 SASS 的 GPU 架构与当前 GPU 架构不对应的话是不能运行的。PTX 是从 SASS 抽象出来的更上层的软件编程模型, 介于 CUDA C 和 SASS 之间, 与硬件架构有比较弱的耦合性。
+* 看生成汇编代码的目的是, 做完优化以后, 我们要判断机器是否能够真正地按照我们设想的模式运行。使用 float4 后, GPU 是否真正使用了向量化的指令。采用循环展开后, GPU 是否真正地会进行展开。
+* 对于访存密集型的 `kernel`, 主要关注有没有采用 `LDG.128` 的访存指令, `#pragma unroll` 是否有效展开了, 计算指令占比是不是不太多。对于计算密集型的 `kernel`, 重点关注计算指令的占比。如果并行策略不太行，那么计算指令的占比会很低，这样的话，访存所导致的 latency 很难被计算指令掩盖，计算效率会非常差。如果并行策略比较好，那么计算指令的占比也会非常地高。也只有当计算指令占比非常高的时候，才有可能地去逼近峰值性能。
 
 ## 向量化内存访问
 * 硬件的 FLOPS 与带宽比例不断增加, 使得很多 CUDA 内核都是受带宽限制的。使用向量化访存可以减少访存指令, 指令 cache 里能够存下更多指令, 提高指令 cache 的命中率, 提高带宽利用率。
@@ -156,3 +158,126 @@ __global__ void kernel_C(int *d_s, int *d_o){
 }
 ```
 * 向量化内存访问比较适用于 `element-wise`(对每个元素单独组一个算数操作, 然后直接输出, 如 `add`, `mul`, `concat`)。判断是否用上了向量化的访存是看 SASS 代码中有没有 `LDG.E.128 Rx, [Rx.64]` 或 `STG.E.128 [R6.64], Rx` 这些指令的存在。有则向量化成功，没有则向量化失败(所以有时即使在 CUDA C/C++ 端使用了向量化读取, 速度还没不使用的快)。
+
+## 数据预取(Prefetching)
+* 对于 GPU 来说, 一般会考虑使用更多的 warp 来隐藏内存延迟。如果延迟仍然很高, 可以考虑以软件的方式使用预取。使用数据预取可以提前将数据从主机内存或全局内存加载到 GPU 的高速缓存(共享内存或寄存器), 避免在计算过程中等待内存访问所产生的延迟, 提高带宽利用率。数据预取分为批量预取和滚动预取。
+* 接下来举的例子中每个线程网格都是一维的
+```C++
+// 网格块跨步法, 依据全局内存中 arr 的元素个数, 每个线程迭代几次, 将数据从全局加载在到其寄存器中
+for (i=threadIdx.x; i<imax; i+= BLOCKDIMX) {
+    double locvar = arr[i];
+    /* 接下来很多指令使用 locvar 变量*/
+}
+
+// 每个线程都引入了计数器 ctr, 来记录当前线程迭代的步数, 这里的预取距离(PDIST)是 4, 这里必须假设每个线程的迭代步数都能够被 4 整除
+// 这个是批量预取到寄存器中, 通常预取的值越多, 方法越有效
+double v0, v1, v2, v3;
+for (i=threadIdx.x, ctr=0; i<imax; i+= BLOCKDIMX, ctr++) {
+    int ctr_mod = ctr%4;
+    if (ctr_mod==0) {  // 一个线程每迭代四步, 就填充 buffer
+        v0=arr[i+0* BLOCKDIMX]; 
+        v1=arr[i+1* BLOCKDIMX]; 
+        v2=arr[i+2* BLOCKDIMX]; 
+        v3=arr[i+3* BLOCKDIMX];
+    }
+    switch (ctr_mod) { // 依据当前的迭代步数, 从预取的寄存器中得到值
+        case 0: double locvar = v0; break;
+        case 1: double locvar = v1; break;
+        case 2: double locvar = v2; break;
+        case 3: double locvar = v3; break;
+    }
+    /* 接下来很多指令使用 locvar 变量*/
+}
+
+// 当寄存器数组中元素个数比较少的时候, 才是放到寄存器中
+double v[4];
+for (int i=threadIdx.x, ctr=0; i<imax; i+= BLOCKDIMX, ctr++) {
+    int ctr_mod = ctr%4;
+    if (ctr_mod==0) {  // 一个线程每迭代四步, 就填充 buffer
+        for(int k=0; k<4; ++k){
+            v[i] = arr[i+k* BLOCKDIMX];
+        }
+    }
+    double locvar = v[ctr_mod];
+    /* 接下来很多指令使用 locvar 变量*/
+}
+
+/*
+    这种对共享内存的操作, 不需要加共享内存同步指令
+    1) 每个线程只会访问自己所需要的共享内存数据, 不会出现数据竞争问题
+    2) 每个线程都是写完才读的, 不存在其他线程写的, 自己来读这种情况
+*/
+// 批量预取到共享内存中, 也要保证每个线程的迭代步数能够被 PDIST 整除
+constexpr int PDIST = 4;  // PDIST 是预取举例
+// 用共享变量来存储预取的数据, index 是线程迭代次数 % PDIST 后的结果.
+#define vsmem(index)  v[index+PDIST*threadIdx.x]
+
+__shared__ double v[PDIST* BLOCKDIMX];  // 分配空间, 每个线程预留 PDIST 个空间
+for (int i=threadIdx.x, int ctr=0; i<imax; i+= BLOCKDIMX, ctr++) {
+    int ctr_mod = ctr % PDIST;
+    if (ctr_mod==0) {
+        for (int k=0; k<PDIST; ++k) vsmem(k) = arr[i+k* BLOCKDIMX];
+    }
+    double locvar = vsmem(ctr_mod);
+    /* 接下来很多指令使用 locvar 变量*/
+}
+
+
+/* 以上的批量预取到寄存器和批量预取到共享内存, 都有一个问题, 就是需要每个线程的迭代步数, 都能整除 PDIST, 接下来的滚动预取, 能够克服这一点*/
+
+/*
+
+*/
+// 仍然是每个线程预取 PDIST 的空间, 但是不再要求每个线程的迭代步数能够整除 PDIST
+constexpr int PDIST = 4;
+#define vsmem(index)  v[index+PDIST*threadIdx.x]
+__shared__ double v[PDIST* BLOCKDIMX];  // 仍然是每个线程预取 PDIST 的空间
+
+for (int k=0; k<PDIST; ++k) vsmem(k) = arr[threadIdx.x+k* BLOCKDIMX];  // 要求第一次预取能够达到
+for (int i=threadIdx.x, ctr=0; i<imax; i+= BLOCKDIMX, ctr++) {
+    int ctr_mod= ctr%PDIST;
+    double locvar = vsmem(ctr_mod);
+    // 这个判断条件可能 i+PDIST*BLOCKDIMX < imax 能更好理解一些, 判断这个线程是否还有需要的缓冲元素
+    if (i<imax-PDIST* BLOCKDIMX) vsmem(ctr_mod) = arr[i+PDIST* BLOCKDIMX];
+
+    /* 接下来很多指令使用 locvar 变量*/
+}
+
+/*以上可能共享内存会存在 bank 冲突, 在共享内存中填充(padding)数组大小，以避免错误的跨步*/
+#define vsmem(index) v[index+(PDIST+PADDING)*threadIdx.x]
+```
+* 循环最简单的优化, 称为展开。因为如果循环足够短, 可以告诉编译器完全展开循环, 并显式展开迭代。因为迭代是独立的，编译器可以预先发出所有数据请求(“加载”)，只要它为每个加载分配不同的寄存器。这些请求可以相互重叠, 这样整个加载的过程只会经历一个内存延迟，而不是所有单个延迟的总和。就是可能需要大量的寄存器来接受加载的结果。
+
+## SGEMM
+* 矩阵乘法 (GEMM) 通常是模型里最耗时的部分(卷积, attention), 所以其优化是非常重要的。GEMM 的优化的手段主要是 `数据分块` 和 `利用多级存储进行数据搬运`。假设计算矩阵乘法 $C = A\times B$, 其中 A 的大小为 $M\times K$, B 的大小为 $K \times N$, C 的大小为 $M \times N$。针对 C 进行第一次分块, 分块的大小为 $block_m \times block_n$, 那么分成的总的块数为 $(M/block_m) \times (N/block_n)$。让每个线程网格中的每个线程块负责一个 C 中的数据块的计算, 即 `dim3 grid(M/block_m \times N/block_n)`。对这个大小为 $block_m \times block_n$ 的数据块再次进行划分, 分块大小为 $thread_m \times thread_n$, 每个线程负责这一块的计算, 即 `dim3 block(block_m/thread_m, block_n/thread_n)`。
+* 对应每个块负责的 C 中输出的部分, 其结果是由大小为 $block_m \times K$ 和 $K \times block_n$ 两个矩阵做乘法得到的。但是 K 的大小通常是很大的, 一次性可能放不下这么多数据, 那么将 K 这个维度进行分块, 每个块的大小为 $block_k$。$block_m \times block_k$ 和 $block_k \times block_n$ 的乘积大小仍然是 $block_k \times block_n$, 迭代 $K/block_k$ 次, 将每次迭代的结果进行对应元素相加就是原始长度矩阵相乘的结果。通过这种方法, 我们就节省了每个块存储数据所需要的共享内存的大小。通过这样的变换, 每个块内的线程只需要负责处理好这一迭代块的数据即可。
+* 对于每个线程负责的 C 中输出的部分, 其每次处理的是一个迭代块的共享内存的数据, 其每次取得的数据块应该是 $thread_m \times block_k$ 和 $block_k \times thread_n$, 仍将其进行分成多个迭代($block_k$), 每个线程有一个寄存器大小为 $thread_m \times thread_n$, 每次迭代都生成这么大的大小, 然后与其进行累加。通过$block_k$ 次小迭代之后, 会得每个迭代的对应分块的结果。通过 $K/block_k$ 次大迭代之后, 每个块能够得到对应矩阵 C 中分块的结果。
+* 其中也使用数据预取的技术(这里也有人认为是双缓冲的技术), `kernel` 整体的流程如下:
+```C++
+// 分配双倍的共享存储空间
+__shared__ float As[2][BLOCK_SIZE_K][BLOCK_SIZE_M];
+__shared__ float Bs[2][BLOCK_SIZE_K][BLOCK_SIZE_N];
+
+// 分配双倍的寄存器存储空间
+float frag_a[2][THREAD_SIZE_Y];
+float frag_b[2][THREAD_SIZE_X];
+
+// 分配双倍的寄存器存储空间, 要先将全局存储数据搬运到寄存器中再搬运到共享内存中
+float ldg_a_reg[4*ldg_num_a];
+float ldg_b_reg[4*ldg_num_b];
+
+// 每个寄存器的结果, 迭代完 256 个大迭代后, 将结果写入全局内存中
+float accum[THREAD_SIZE_Y][THREAD_SIZE_X] = {0};  // 这个最后直接赋值到输出矩阵 C 中
+
+// 把第一个大迭代块所需要的数据从全局内存读入到共享内存
+// 把第一个小迭代块所需要的数据从共享内存读入到寄存器中
+for k in 256 大迭代:
+    // 将下一个大迭代块所需要的数据从共享内存预取到寄存器中
+    for k in 7 小迭代:
+        // 将下一个迭代所需要的数据从共享内存预取到寄存器中
+        // 依靠本次寄存器中的数据进行本次迭代计算, 结果写到 accum 中
+    // 将下一个大迭代块所需要的数据从寄存器取到共享内存中
+    // 计算最后一个小迭代, 结果写到 accum 中
+
+// 完成 256 次大迭代后, 每个线程将结果写到全局内存中
+```
