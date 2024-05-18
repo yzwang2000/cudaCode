@@ -355,3 +355,207 @@ __global__ void Kernel_A(
 }
 ```
 * 这里编写的时候, 有一个技巧, 就是每次先确定共享内存的行和列的索引(这个就是对应实际矩阵的行和列), 然后再思考如何与全局内存对应。记着, 输入全局内存逐行读取, 逐行写入共享内存。逐列读取共享内存, 逐行写入全局内存。而且不要忘记了要避免 `bank` 冲突。
+
+## prefix_sum
+* 前缀扫描接受一个二元关系运算符 $\oplus$ 和一个数组 $\big[a_0, a_1, \cdots, a_n-1\big]$, 返回一个相同长度的数组 $\big[a_0, \big(a_0 \oplus a_1\big), \cdots, \big(a_0 \oplus a_1 \oplus \cdots \oplus a_n-1\big)\big]$。这个是包含扫描的形式, 独占扫描的形式就是只扫描前面的, 而不包含当前的。
+```C++
+int input_arr[] = {3, 1,  7,  0,  4,  1,  6,  3};
+// 包含扫描和为    [3, 4, 11, 11, 15, 16, 22, 25]
+// 独占扫描和为    [0, 3,  4, 11, 11, 15, 16, 22]
+
+// input_arr 末尾填充一些 0
+int input_arr[] = {3, 1,  7,  0,  4,  1,  6,  3,  0,  0,  0};
+// 包含扫描和为    [3, 4, 11, 11, 15, 16, 22, 25, 25, 25, 25]
+// 独占扫描和为    [0, 3,  4, 11, 11, 15, 16, 22, 25, 25, 25]
+```
+* 接下来介绍的前缀和并行算法是独占扫描。首先介绍输入数组元素个数比较少的时候(元素个数小于等于 `2048`), 算法的整体思路。
+    * 先依据输入元素的个数 `N` 找到大于等于其最小的 2 的幂次的数 `padding_N`(接下来的上扫和下扫都是树形规约, 必须要求元素个数是 2 的幂次)。
+    * 依据 `padding_N` 来设置共享内存, `kernel` 的启动方式是 `<<<1, padding_N/2>>>` (如果元素个数等于线程个数, 那么在第一次树形规约的时候, 就会有一半的线程不干活)。
+    * 每个线程负责将两个数据从全局内存读取到共享存储(因为 `N` 的奇偶性不能确定, 所以把循环展开, 超出 N 个元素的都填充为 0)。
+    * 上扫的过程(树形规约)。整体的思路是 a. padding_N/2 的大小决定了循环的次数(int d=pdding_N/2 为初始条件, 一直到 d==0 时停止。d其实就是参与本次循环的线程个数) b. 通过 a 确定了每次运行的线程总数, 那么每次就放出前 d 个线程参与操作。c. 给每个线程分配要处理的数据的索引, 这里用到 offset, offset 为 1 是初始条件(offset 表示, 本次循环中, 从多少个数据中取一个数据出来参与运算, 每次循环结束时, offset 都会乘以 2)。d. 任何时候, 一个线程都是处理两个数据。
+    * 利用一个线程将共享存储最后一个元素置为 0(此时整个共享存储已经进行一次树形规约的操作).
+    * 下扫过程(逆向树形规约)。a. 仍然是线程个数确定了循环的次数(线程个数从 1, 2, ..., padding_N/2 变化) b. 依据每次循环的线程个数, 放出前 d 个线程参与操作。c. 给每个线程分配要处理的数据索引, 这里也用到 offset, offset 为 padding_N/2 是初始条件, 从这么多数据选取一个。
+    * 最后要将共享内存的数据写入到全局内存中, 仍然是将循环展开, 解决奇偶性的问题。
+```C++
+__global__ void parallel_block_scan_kernel(int *data, int *prefix_sum, int N)  // 这里的 N 是填充前, 真实元素的个数
+{
+    extern __shared__ int tmp[];
+    int tid = threadIdx.x;
+    int leaf_num = blockDim.x * 2;  // equals to length of tmp
+
+    // 这里其实是循环展开了, 每个线程负责运输两个数据, 用 0 来补充
+    tmp[tid * 2] = tid * 2 < N ? data[tid * 2] : 0;
+    tmp[tid * 2 + 1] = tid * 2 + 1 < N ? data[tid * 2 + 1] : 0;
+    __syncthreads();  // 同步不能忘记了
+
+    // 上扫过程, 每个线程处理两个元素
+    int offset = 1;  // 相隔多少个元素取一个元素
+    // 先确定要使用的线程, 再给这些线程分配操纵的数据
+    for (int d = leaf_num >> 1; d > 0; d >>= 1)
+    {
+        if (tid < d)  // 先筛选出需要的线程个数, 选好后的每个线程总是负责两个数据
+        {
+            int ai = offset * (2 * tid + 1) - 1;  // 2*tid 是每个线程处理 2*tid*offset 个元素, +1 是指取出第一个块的后一个元素
+            int bi = offset * (2 * tid + 2) - 1;
+            tmp[bi] += tmp[ai];
+        }
+        offset *= 2;
+        __syncthreads();
+    }
+
+    // 每个块都使用 tid 为 0 的线程, 将共享存储中最后一个元素置为0, 只有完成这一步才能下扫
+    if (tid == 0)
+    {
+        tmp[leaf_num - 1] = 0;
+    }
+    __syncthreads();
+
+    // 下扫过程, 每个线程处理两个元素
+    for (int d = 1; d < leaf_num; d *= 2)
+    {
+        offset >>= 1;
+        if (tid < d)
+        {
+            int ai = offset * (2 * tid + 1) - 1;
+            int bi = offset * (2 * tid + 2) - 1;
+
+            float v = tmp[ai];
+            tmp[ai] = tmp[bi];
+            tmp[bi] += v;
+        }
+        __syncthreads();
+    }
+
+    // 每个线程处理两个元素, N 的个数可能为奇数, 也可能为偶数, 这里其实也是展开了
+    // 先搬所有偶数, 再搬所有奇数
+    if (tid * 2 < N)
+    {
+        prefix_sum[tid * 2] = tmp[tid * 2];
+    }
+    if (tid * 2 + 1 < N)
+    {
+        prefix_sum[tid * 2 + 1] = tmp[tid * 2 + 1];
+    }
+}
+```
+* 代码优化到这里已经可以了, 但是仍然存在问题就是共享存储中存在 bank 冲突。在上扫和下扫的过程中, 当 offset 是 32 的整数倍的时候, 甚至存在 32 路的 bank 冲突。仍然是通过填充来减少 bank 冲突问题。通用的 bank 填充方式。
+```C++
+#define NUM_BANKS 32
+#define LOG_NUM_BANKS 5
+#define CONFLICT_FREE_OFFSET(n) (((n) >> LOG_NUM_BANKS) + ((n) >> (2 * LOG_NUM_BANKS)))
+```
+* 以上是解决 bank 冲突问题的宏定义, `CONFLICT_FREE_OFFSET(n) = n / num_banks + n / (num_banks^2)`。其实思路仍然是每 32 个元素填充一个。
+    * 首先由数组元素的个数分配共享内存 `padding_N + CONFLICT_FREE_OFFSET(padding_N - 1)`, 启动方式仍然是 `<<<1, padding_N/2>>>`
+    * 在 kernel 内部, 仍然是认为规约元素个数是 `padding_N`, 只不过 `padding_N` 个元素要放到分配的共享内存的位置。共享内存多分配的空间既不会读到, 也不会写到。这些只是空间只是占位的作用。
+    * 按照正常的线程对应元素的逻辑来找在 `padding_N` 中的索引位置, 这个索引位置在经过一次 `CONFLICT_FREE_OFFSET()` 求出其前面的 padding 个数, 加到之前的索引上再索引共享内存就可以了。
+```C++
+// 有 bank 填充的时候, tmp 分配的空间更多了, 这些空间既不会读到, 也不会写到。
+// 仍然是正常的逻辑来处理元素, 只不过放入共享内存, 或者从共享内存读取的时候, 需要依据其所在元素的位置计算偏移
+__global__ void parallel_block_scan_bcao_kernel(int *data, int *prefix_sum, int N)
+{
+    extern __shared__ int tmp[];
+    int tid = threadIdx.x;
+    int leaf_num = blockDim.x * 2; // not equals to length of tmp, 填充到 2 的幂次的大小, 但是没有填充 bank
+
+    int ai = tid;  // 前一半中的元素
+    int bi = tid + (leaf_num >> 1);  // 后一半中对应的元素
+    int offset_ai = CONFLICT_FREE_OFFSET(ai);  // ai 前有多少个元素的填充
+    int offset_bi = CONFLICT_FREE_OFFSET(bi);  // bi 前有多少个元素的填充
+
+    tmp[ai + offset_ai] = ai < N ? data[ai] : 0;
+    tmp[bi + offset_bi] = bi < N ? data[bi] : 0;
+    __syncthreads();
+
+    // 加 bank 的 offset 是是先算出来原本的索引, 再依据原本的索引添加 offset
+    int offset = 1;
+    for (int d = leaf_num >> 1; d > 0; d >>= 1)
+    {
+        if (tid < d)
+        {
+            int ai = offset * (2 * tid + 1) - 1;
+            int bi = offset * (2 * tid + 2) - 1;
+            ai += CONFLICT_FREE_OFFSET(ai);
+            bi += CONFLICT_FREE_OFFSET(bi);
+            tmp[bi] += tmp[ai];
+        }
+        offset *= 2;
+        __syncthreads();
+    }
+
+    if (tid == 0)
+    {
+        tmp[leaf_num - 1 + CONFLICT_FREE_OFFSET(leaf_num - 1)] = 0;
+    }
+    __syncthreads();
+
+    for (int d = 1; d < leaf_num; d *= 2)
+    {
+        offset >>= 1;
+        if (tid < d)
+        {
+            int ai = offset * (2 * tid + 1) - 1;
+            int bi = offset * (2 * tid + 2) - 1;
+            ai += CONFLICT_FREE_OFFSET(ai);
+            bi += CONFLICT_FREE_OFFSET(bi);
+
+            float v = tmp[ai];
+            tmp[ai] = tmp[bi];
+            tmp[bi] += v;
+        }
+        __syncthreads();
+    }
+
+    if (ai < N)
+    {
+        prefix_sum[ai] = tmp[ai + offset_ai];
+    }
+    if (bi < N)
+    {
+        prefix_sum[bi] = tmp[bi + offset_bi];
+    }
+}
+```
+* 接下来介绍输入数组元素个数比较多的时候(元素个数大于 `2048`), 算法的整体思路。
+    * 元素多的时候, 就不再纠结某个块的填充个数, 而是直接对块的个数进行向上取整, 每个块都认为要处理的元素个数是最大值。以 `<<<block_num, max_threads_per_block>>>` 的方式启动 `kernel`, `block_num` 的计算方式是 `N/max_elements_per_block`。
+    * 这是一个递归函数 `recursive_scan`。 递归的思路是将当前的数据块进行分块, 每个块进行扫描和(与此同时求得每个扫描快的和), 转变为求扫描块的和, 然后讲扫描块的递归和加到原始的已经分块递归好的数据中。
+```C++
+void recursive_scan(int *d_data, int *d_prefix_sum, int N, bool bcao)
+{
+    // 这两行是一个向上取整的操作
+    int block_num = N / MAX_ELEMENTS_PER_BLOCK;  // 分配几个块
+    if (N % MAX_ELEMENTS_PER_BLOCK != 0)
+    {
+        block_num += 1;
+    }
+
+    // 将每个段的和再次规约
+    int *d_sums, *d_sums_prefix_sum;  // 数组中存放的是每个块的数据
+    CUDA_CHECK(cudaMalloc(&d_sums, block_num * sizeof(int)));
+    CUDA_CHECK(cudaMalloc(&d_sums_prefix_sum, block_num * sizeof(int)));
+
+    // 依据当前数据所需要的块来进行前缀扫描和
+    if (bcao)
+    {
+        parallel_large_scan_bcao_kernel<<<block_num, MAX_THREADS_PER_BLOCK>>>(d_data, d_prefix_sum, N, d_sums);
+    }
+    else
+    {
+        parallel_large_scan_kernel<<<block_num, MAX_THREADS_PER_BLOCK>>>(d_data, d_prefix_sum, N, d_sums);
+    }
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    // 当 block_num 的个数不为 1 的时候, 就需要再次递归, 转化为子问题。
+    // 当 block_num 的个数为 1 的时候, 就不需要递归了, 函数就结束了(递归结束的条件, 数学归纳法的初始条件)。
+    if (block_num != 1)  // 判断块的个数是否为1
+    {
+        recursive_scan(d_sums, d_sums_prefix_sum, block_num, bcao);
+        add_kernel<<<block_num, MAX_THREADS_PER_BLOCK>>>(d_prefix_sum, d_sums_prefix_sum, N);
+        CUDA_CHECK(cudaGetLastError());
+        CUDA_CHECK(cudaDeviceSynchronize());
+    }
+
+    CUDA_CHECK(cudaFree(d_sums));
+    CUDA_CHECK(cudaFree(d_sums_prefix_sum));
+}
+```
