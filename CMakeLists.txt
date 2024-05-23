@@ -59,5 +59,5 @@ link_directories(
 # add_executable(main ./gemm/gemm_v1.cu)
 # add_executable(main ./gemv/gemv_v1.cu)
 # add_executable(main ./transpose/transpose_v1.cu)
-add_executable(main ./transpose/transpose_v2.cu)
+add_executable(main ./FP16/fp16_v2.cu)
 target_link_libraries(main PUBLIC cublas)
