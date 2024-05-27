@@ -1,11 +1,6 @@
 cmake_minimum_required(VERSION 3.10 FATAL_ERROR)
+project(scan LANGUAGES CXX CUDA)
 
-set(CUDA_PATH "/usr/local/cuda-11.8")
-set(CMAKE_CUDA_COMPILER "${CUDA_PATH}/bin/nvcc")
-set(CMAKE_BUILD_TYPE Debug)  # 控制编译类型
-project(cudaCode LANGUAGES CXX CUDA)
-
-# 设置 C++ 支持的标准
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -37,23 +32,16 @@ set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
-# 设置公共的头文件
-set(COMMON_HEADER_DIRS
-  ${CUDA_PATH}/include
-)
+set(INCLUDE_DIRS
+    ${PROJECT_SOURCE_DIR}/include)
 
-# 设置公共的库文件
-set(COMMON_LIB_DIRS
-  ${CUDA_PATH}/lib64
-)
+set(CPP_SRC
+    ${PROJECT_SOURCE_DIR}/src/main.cpp
+    ${PROJECT_SOURCE_DIR}/src/utils.cpp)
 
-include_directories(
-  ${COMMON_HEADER_DIRS}
-)
+set(CUDA_SRC
+    ${PROJECT_SOURCE_DIR}/src/scan.cu)
 
-link_directories(
-  ${COMMON_LIB_DIRS}
-)
 
-add_executable(main ./streams/streams_v2.cu)
-target_link_libraries(main PUBLIC cublas)
+include_directories(${INCLUDE_DIRS})
+add_executable(main ${CPP_SRC} ${CUDA_SRC})

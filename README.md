@@ -645,3 +645,76 @@ inline void __getLastCudaError(const char *errorMessage, const char *file,
   }
 }
 ```
+## CUDA Steam 和 Event [原文](https://zhuanlan.zhihu.com/p/561596986)
+* CUDA Event 的操作其实就是向指定 stream 中插入一个眼, 这个插入操作也会进入插入的 stream 中顺序执行。能够检测这个流是否执行到了这个眼, 还能在 host 端阻塞进程, 等待这个流中 event 的完成。
+* CUDA Event 的常见作用是 a. 同步 stream 执行 b. 操控 devcie 运行步调 c. 记录运行时间
+* 与 CUDA Event 相关的常见函数有
+    * cudaEventCreate(cudaEvent_t *event)  // 在当前设备上产生一个 Event 对象
+    * cudaEventRecord(cudaEvent_t event, cudaStream_t stream=0);  // 向指定的流中插入时间, 默认向默认的流(0)中插入 event。把这条事件放入指定流未完成的队列中。此函数可以在同一个事件上多次调用, 该事件会被重置, 并且其时间戳会被更新为最后一次记录的时间。当使用 cudaEventSynchronize 或 cudaEventElapsedTime 时，这些函数会基于最后一次记录的时间戳进行同步和计算。只有当流中完成了 cudaEventRecord 之前的所有语句之后, 事件才会被记录下来。
+    * cudaEventSynchronize(cudaEvent event)  // 阻塞 host 线程, 直到中 event 被完成(其实也是等待 event 所在流中在 event 之前的任务被完成)。
+    * cudaEventElapsedTime(float *ms, cudaEvent_t start, cudaEvent_t end);  // 记录两个 event 之间的时间, 以 ms 为单位, 分辨率是 0.5 us
+* CUDA Stream 是指一系列的操作, 这些操作按照在主机代码发出的顺序在设备上执行。同一个 Stream 里的操作是按照主机代码发出的顺序顺序执行的, 不同 Stream 里面的操作可以异步执行, 在可能的情况下可以并发执行。
+* CUDA 的 Stream 分为两种, 默认流(default stream 或 null stream) 和显示流。默认流与显示流的区别主要是:
+    * 默认流中有未完成的操作, 那么默认流之后启动的任何其他流中的操作将会等待这些操作完成后才会开始执行。
+    * 非默认流中的操作正在执行, 那么在非默认流中启动的任何操作都会将等待这些非默认流中的操作完成后才会开始执行。
+    * 不同的非默认流之间没有这种隐式同步, 不同非默认流中的操作可以并行执行。
+* 对于非默认流中一些常见函数有
+    * cudaStreamCreate(ccudaStream_t *pStream);  // 创建一个异步流
+    * cudaStreamDestroy(cudaStream_t stream);  // 销毁一个异步流
+    * cudaMemcpyAsync(void *dst, const void *src, size_t count, enum cudaMemcpyKind kind, cudaStream_t stream __dv(0));  // 在流中异步传送数据, 异步传送表示在指定流中启动完异步传送后, host 就会跳到下一行执行。
+    * cudaDeviceSynchronize();  // 阻止主机代码等待之前在设备上发出的所有流中所有操作完成都完成。
+    * cudaStreamSynchronize(cudaStream_t stream);  // 阻止主机进程, 直到指定流中以前发出的所有操作都完成。
+    * cudaMallocHost(void **ptr, size_t size);  // 分配页锁定内存
+    * cudaFreeHost(void *ptr);  // 释放页锁定内存
+* 通过 overlap 来加速
+    * 单个 Stream 中通过 Host 计算与 GPU 计算的 Overlap 来提高效率。接下来的流中, cudaMemcpy() 是同步的数据拷贝(阻塞 host 进程, 直到数据拷贝完成)。而 `kernel` increment 是异步的, 也就是说 `kernel` 被启动, Host 就可以运行下一行的代码, 那么 `kernel` 就会与 Host 代码出现 Overlap, 如果二者计算相等, 那么第四行基本可以无缝衔接。
+    ```C++
+    cudaMemcpy(d_a, a, numBytes, cudaMemcpyHostToDevice);
+    increment<<<1,N>>>(d_a)
+    myCpuFunction(b)
+    cudaMemcpy(a, d_a, numBytes, cudaMemcpyDeviceToHost);
+    ```
+    * 多个 stream 通过内核执行, 数据传输之间的 Overlap 来提高效率。有以下几点需要注意
+    * 多个流之间的 Overlap 一定是发生在默认流之间的, 默认流不会与任何非默认流并行执行。
+    * 数据传输所涉及的主机内存必须是`锁页内存(pinned memory)`。
+    * CUDA 包含用于各种任务的引擎, 在 host 发出操作时, 这些引擎会对操作进行排队。不同引擎中的任务之间的依赖关系得到维护, 每个引擎中的任务将会按照它们的发出顺序顺序执行。比如有些设备有 `H2D` `kernel` `D2H` 三种引擎, 而有些设备只有 `H2D`/`D2H` 和 `kernel` 两个引擎。这使得不同的启动顺序就会有差别。
+    ```C++
+    checkCuda(cudaEventRecord(startEvent, 0));
+    for (int i = 0; i < nStreams; ++i){
+    int offset = i * streamSize;
+    checkCuda(cudaMemcpyAsync(&d_a[offset], &a[offset], 
+                                streamBytes, cudaMemcpyHostToDevice, 
+                                stream[i]));
+    kernel<<<streamSize/blockSize, blockSize, 0, stream[i]>>>(d_a, offset);
+    checkCuda(cudaMemcpyAsync(&a[offset], &d_a[offset], 
+                                streamBytes, cudaMemcpyDeviceToHost,
+                                stream[i]));
+    }
+    checkCuda(cudaEventRecord(stopEvent, 0));
+    checkCuda(cudaEventSynchronize(stopEvent));
+    checkCuda(cudaEventElapsedTime(&ms, startEvent, stopEvent));
+    printf("Time for asynchronous V1 transfer and execute (ms): %f\n", ms);
+    printf("  max error: %e\n", maxError(a, n));
+    ```
+    * 以上的代码中, 测量非默认流的时间, 也是在默认流中记录 Event, 然后同步 Event 的执行。这是因为默认流与隐式流不会并行执行, 所以 cudaEventSynchronize(stopEvent) 等待 stopEvent 完成时, 其间测量的其他流一定是完成了其操作了。
+* 编写多 `stream` 代码时候的注意事项: a. 拷贝要用 `cudaMemcpyAsync()`, 并且最后一个参数还要指定 stream b. 运行 `kernel` 的时候也要指定 `stream`。c. 如果是将数据分段, 每个段交给不同的流来处理, 那么只需要每个找到每个段的起始位置指针和这个段元素的大小, 然后分段拷贝, 分段处理。
+```C++
+// 使用多个流, 实现 copy 与 kernel 的并行操作
+checkCudaErrors(cudaEventRecord(start_event, 0));  // default 上这个执行完了, 才会执行非默认流中的操作
+for(int i=0; i<numStream; ++i)
+{
+    int cur = i * streamSize;  // 当前处理的元素个数
+    checkCudaErrors(cudaMemcpyAsync(&d_i[cur], &h_i[cur], streamBytes, cudaMemcpyHostToDevice, streamVec[i]));
+    kernel_A<<<streamSize/blockSize, blockSize, 0, streamVec[i]>>>(&d_i[cur], &d_o[cur], 0);
+    checkCudaErrors(cudaMemcpyAsync(&h_o[cur], &d_o[cur], streamBytes, cudaMemcpyDeviceToHost, streamVec[i]));
+}
+checkCudaErrors(cudaEventRecord(stop_event, 0));
+checkCudaErrors(cudaEventSynchronize(stop_event));
+checkCudaErrors(cudaEventElapsedTime(&letancy, start_event, stop_event));
+std::cout << "multiple stream letancy: " << letancy << " ms" << std::endl;
+```
+## CUDA 中锁页内存和分页内存
+* 我们的主机支持虚拟内存系统, 也就是使用硬盘空间来替代内存。大多数系统中虚拟内存空间被划分为许多页, 虚拟寻址能够使一个连续的虚拟内存地址空间映射到物理内存并不连续的一些页。如果某页的物理内存被标记为换出状态, 它就可能被更换到磁盘上(被踢出内存)。当下次再访问这一页的时候, 重新加载到内存里。
+* 分页内存(pageable memory): CPU 的 `malloc` 分配的就是分页内存, 能够被换出到磁盘上, 利用 `free` 释放。
+* 页锁定内存(pinned memory): 被锁定的页面会被操作系统标记为不可换出, host 和 device 可以使用页面的物理地址直接访问, 避免了过多的复制操作。`cudaMallocHost` 和 `cudaHostAlloc` 分配页锁定内存, 利用 `cudaFreeHost` 释放。
+* 默认情况下 Host 分配的是可分页内存, GPU 不能直接从可分页主机内存访问数据。因此当调用从可分页主机内存到设备内存的数据传输时, CUDA 驱动程序必须首先创建一个临时缓冲区(锁页内存), 把数据从可分页内存复制到锁页内存上, 然后 GPU 再从锁页内存读取数据。但是 CPU 将数据从可分页内存拷贝到临时的锁页内存是有时间开销的，而且这个锁页内存还只是临时的，所以用完之后会被销毁。
