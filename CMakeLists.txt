@@ -55,5 +55,6 @@ link_directories(
   ${COMMON_LIB_DIRS}
 )
 
-add_executable(main ./streams/streams_v2.cu)
+# add_executable(main ./streams/streams_v2.cu)
+add_executable(main ./gemm/gemm_v2.cu)
 target_link_libraries(main PUBLIC cublas)
