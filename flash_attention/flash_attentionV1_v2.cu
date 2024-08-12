@@ -11,7 +11,7 @@ constexpr int hidden_dim = 64;
 // Q, K, V, O 均为 (bs, nh, seq_len, d)
 __global__ void kernel_flashAttention(float* Q, float* K, float* V, float *O, float* l, float *m, int tile_size, int niter){
     int tid = threadIdx.x;
-    int bidx = threadIdx.x; int bidy = threadIdx.y;  // nhead 和 batchsize
+    int bidx = blockIdx.x; int bidy = blockIdx.y;  // nhead 和 batchsize
 
     // 寻找当前的 block 要处理到哪里的数据了
     int qkv_offset = bidy * num_head * seq_len * hidden_dim + bidx * seq_len * hidden_dim;

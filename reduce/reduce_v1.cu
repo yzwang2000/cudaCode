@@ -3,9 +3,8 @@
 
 constexpr int N = 512000;
 constexpr int thread_per_block = 256;  // 每个块中包含的线程个数
-constexpr int num_per_block = 512;  // 每个处理的数据个数
+constexpr int num_per_block = 512;     // 每个处理的数据个数
 constexpr int num_block_per_grid = N/num_per_block;
-
 
 // 在不使用 shuffle 的情况下, 进行规约操作, 需要 shared_memory
 // 因为除了 global memory 就剩下 shared_meory 可以做为线程之间通信的中介
@@ -18,9 +17,10 @@ __global__ void Kernel_A(int *d_s, int *d_o)
     // 每个线程先将负责的部分的数据规约到自己的寄存器中
     int sum = 0;
     #pragma unroll
-    for(int i=tid; i<num_per_block; i+=blockDim.x)
+    for(int i=2*tid; i<num_per_block; i+=2*blockDim.x)
     {
-        sum += b_s[i];
+        int2* tmp = reinterpret_cast<int2*>(&(b_s[i]));
+        sum += (tmp->x + tmp->y);
     }
     
     // 每个块中都分配共享内存, 共享内存负责存储每个线程的变量的值

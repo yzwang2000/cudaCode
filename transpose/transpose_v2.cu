@@ -2,7 +2,6 @@
 #include <cuda.h>
 #include <iostream>
 
-
 // 32*16 大小的线程块要操作 block_size_m*block_size_n 大小的数据块
 template<int block_size_m, int block_size_n> 
 __global__ void Kernel_A(

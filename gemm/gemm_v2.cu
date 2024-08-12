@@ -2,7 +2,7 @@
 #include <iostream>
 #include <cuda.h>
 
-// A is M*K, B is K*N, C si M*N
+// A is M*K, B is K*N, C is M*N
 constexpr int M = 1024;
 constexpr int K = 256;
 constexpr int N = 1024;
@@ -31,7 +31,7 @@ __global__ void gemm(float* __restrict__ A, float* __restrict__ B, float* __rest
     float regB[thread_n];
 
     // 最后直接存取到 C 对应的位置
-    float accum[thread_m][thread_n] = {0};
+    float accum[thread_m][thread_n] = {0.f};  // 注意这样初始化为 0 的方式
 
     // 大迭代
     #pragma unroll

@@ -675,7 +675,7 @@ inline void __getLastCudaError(const char *errorMessage, const char *file,
     cudaMemcpy(a, d_a, numBytes, cudaMemcpyDeviceToHost);
     ```
     * 多个 stream 通过内核执行, 数据传输之间的 Overlap 来提高效率。有以下几点需要注意
-    * 多个流之间的 Overlap 一定是发生在默认流之间的, 默认流不会与任何非默认流并行执行。
+    * 多个流之间的 Overlap 一定是发生在非默认流之间的, 默认流不会与任何非默认流并行执行。
     * 数据传输所涉及的主机内存必须是`锁页内存(pinned memory)`。
     * CUDA 包含用于各种任务的引擎, 在 host 发出操作时, 这些引擎会对操作进行排队。不同引擎中的任务之间的依赖关系得到维护, 每个引擎中的任务将会按照它们的发出顺序顺序执行。比如有些设备有 `H2D` `kernel` `D2H` 三种引擎, 而有些设备只有 `H2D`/`D2H` 和 `kernel` 两个引擎。这使得不同的启动顺序就会有差别。
     ```C++
@@ -730,4 +730,169 @@ std::cout << "multiple stream letancy: " << letancy << " ms" << std::endl;
     - `load_matrix_sync`：等待warp中所有线程都到达 `load_matrix_sync` 时候，从内存中加载矩阵片段。其中 Layout 是从 fragment 中推断出来的。
 
 ## flash-attention 优化
-* attention 是从优化访存的角度优化 attention 计算，而且其在推理和训练上都是有效的。主要的技巧有这几个(Tiling 和 Recomputation)：将多个 operation 融合成一个 operation; 推理过程中不将中间结果(Q*KT 和 softmax 的结果)存储到 HBM 中，只将运算结果 output 存回 HBM 中; 在反向传播时候，重新计算 S(Q*KT) 和 P(Softmax) 反而是可以更快(因为Q, K, V 本身就需要加载到 SRAM 中, 直接计算，比访存 HBM 更快)。
+* flash-attention 是从优化访存的角度优化 attention 计算，而且其在推理和训练上都是有效的。主要的技巧有这几个(Tiling 和 Recomputation)：将多个 operation 融合成一个 operation; 推理过程中不将中间结果(Q*KT 和 softmax 的结果)存储到 HBM 中，只将运算结果 output 存回 HBM 中; 在反向传播时候，重新计算 S(Q*KT) 和 P(Softmax) 反而是可以更快(因为Q, K, V 本身就需要加载到 SRAM 中, 直接计算，比访存 HBM 更快)。
+* flash-attentionV2 相比于 V1 有如下改进：
+    - 减少了非矩阵乘法的计算，可以利用 TensorCore
+    - 调整了内外循环，Q 为外层循环，KV为内存循环。通过此种做法减少在 shared memory 上的读写次数。
+    - 如果一个 Block 处于矩阵上三角部分，不进行 attention 计算。
+
+## radix_sort 优化(GTC 2020, 在2009年牛津大学的一篇论文上改进的)
+### cpu 端写法
+* 基数排序(radix sort) 属于分配式排序, 又称 bin sort。透过键值的部分信息, 将要排序得元素分配到某些桶中, 达到排序得作用。基数排序法的效率高于其他稳定性的排序算法。
+* 基数排序是一种`非比较型整数`排序算法，其原理是将整数按位数切割成不同的数字，然后按每个位数分别比较。由于整数也可以表达字符串（比如名字或日期）和特定格式的浮点数，所以基数排序也不是只能使用于整数。
+* 时间复杂度为 `O(n*k)`, 空间复杂度为 `O(k)`。其中 `n` 是需要比较的位数, `k` 是桶的个数(k 其实是每一位有多少种状态)。而且算法是稳定的。由于 k 是固定的, 所以其时间复杂度是线性的。
+![Roofline Model](./fig/radix-sort.png)
+```C++
+// CPU 版本的算法流程如下:
+// maxBits 是输入元素的最大位数; numBits 是将多少个位做为一组来对比, k = 1 << numBits; 
+for(int i=0; i<maxBits; i+=numBits)
+{
+    // 这个是额外的存储空间, 用来统计每个 k 的每个状态的元素个数和元素个数的前缀和
+    std::vector<int> binHistogram(numBins, 0);
+    std::vector<int> binScan(numBins, 0);
+
+    // step 1 遍历 inVec, inVec 中第 i 位值为 [0, numBins-1] 的各有多少, 其值分别放到 binHistogram
+    // step 2 遍历 binHistogram, 计算 binHistogram 的独占式累加和, 存入 binScan 中
+    // step 3 遍历 inVec, 计算其值所属的桶, 得到前缀和, 放到输出的位置 outVec[binScan[bin]++] = inVec[j];
+    // step 4 swap(intVec, outVec)
+}
+
+#include <iostream>
+#include <vector>
+
+// 基数排序是从最低位看起, 把这一位数字值相同的按照扫描顺序放入同一个桶里面, 值小的桶在前面。
+// 当所有数字都扫描完，再使用高一位，循环上述步骤，直至达到所有数字所有的最高位数，最后输出的就是排序后的答案。
+void radixSort(std::vector<unsigned int>& inputVals, int numBits = 2) {
+    int n = inputVals.size();    // 输入元素的个数
+    int numBins = 1 << numBits;  // numBins = 2^numBits, 桶的个数
+    int maxBits = 32;  // Assuming unsigned int (32-bit)
+
+    std::vector<unsigned int> outputVals(n);  // 存放排序后的结果
+    for (int i = 0; i < maxBits; i += numBits){
+        std::vector<int> binHistogram(numBins, 0);
+        std::vector<int> binScan(numBins, 0);
+
+        // Step 1: 计算统计图
+        for (int j = 0; j < n; ++j) {  // 遍历所有元素, 统计每个桶中元素个数
+            int bin = (inputVals[j] >> i) & (numBins - 1);
+            binHistogram[bin]++;
+        }
+
+        // Step 2: 计算前缀和
+        for (int j = 1; j < numBins; ++j) {  // 遍历所有桶, 统计元素个数的前缀和
+            binScan[j] = binScan[j - 1] + binHistogram[j - 1];
+        }
+
+        // Step 3: 基于当前数字来排序
+        for (int j = 0; j < n; ++j) {  // 遍历所有元素, 将输入元素赋值到输出对应的位置
+            int bin = (inputVals[j] >> i) & (numBins - 1);  // 判断当前数字属于那个 bin, 调整其位置
+            outputVals[binScan[bin]++] = inputVals[j];
+            // binScan[bin]++;
+        }
+
+        // Step 4: 下一轮的排序基于当前排序的结果
+        inputVals.swap(outputVals);
+    }
+}
+
+int main() {
+    std::vector<unsigned int> inputVals = {170, 45, 75, 90, 802, 24, 2, 66};
+    radixSort(inputVals, 2);
+
+    for (unsigned int val : inputVals) {
+        std::cout << val << " ";
+    }
+    std::cout << std::endl;
+
+    return 0;
+}
+```
+### gpu 端写法
+* gpu 端的写法与 cpu 端的写法非常相似。这里核心点主要是获取 `d_scan_block_sum` 和 `d_prefix_sums` 这两个数组。
+* `d_scan_block_sum` 的大小为 `4 * num_block`, 其形式是 
+    `[0, block0 中 way 0 的元素个数, block0-block1 中 way0 的元素个数, ..., 0, block0 中 way 1 的元素个数, block0-block1 中 way1 的元素个数]`
+* `d_scan_block_sum` 的求法, 是先求 d_block_sum, 再在这个基础上进行求前缀和得到。`d_block_sum` 统计每个 block 负责的数据各个 way 的元素个数。
+* `d_prefix_sums` 的大小是输入元素的个数, 其每个位置存放的是, 对应输入位置的元素其在 block 中的各个 way 的前缀和。
+    `[0, 1, ..., 0, 1, 2, ..., 0, 1, ..., 0, ...]`
+* `d_prefix_sums` 的求法。每个 block 迭代 4 次, 求每个 way 的前缀和。
+* 当输入数组长度为 400 万时候, 比 `std::sort` 有 17 倍的加速, 在元素个数为 4 万的时候, 有 2 倍的加速比, 在 元素个数为 1 万的时候, 和其持平。
+* 基数排序常用于无符号整数(unsigned int), 对于IEEE 754 其存储形式如下图，最高位表示数字的符号，8位表示指数，23位表示尾数。
+* IEEE float有一个特性，除了最高的符号位，从0位到30位对数值的权重依次增加，这些位与32位无符号整数的排序方法相同，针对符号位可做如下的预处理：对于正浮点数，将最高的符号位取反(由0转化为1)。对于负浮点数，全部位取反，这样便可应用整数的基数排序方法(对浮点数应用位运算前需要将其转化为整形), 排序完成后再将其转化。
+```C++
+unsigned int *data_temp = (unsigned int *)(&src_data[i]);
+*data_temp = (*data_temp >> 31 & 0x1)? ~(*data_temp): (*data_temp) | 0x80000000; 
+```
+```C++
+void radix_sort(unsigned int* const d_out,
+    unsigned int* const d_in,
+    unsigned int d_in_len)  // d_in_len 要排序是数据元素总个数
+{
+    unsigned int block_sz = MAX_BLOCK_SZ;  // 一个 block 最大线程个数
+    unsigned int max_elems_per_block = block_sz;
+    unsigned int grid_sz = d_in_len / max_elems_per_block;  // 每个线程对应一个元素,总共分成多少个 block
+    // Take advantage of the fact that integer division drops the decimals
+    if (d_in_len % max_elems_per_block != 0)  // 向上取整
+        grid_sz += 1;
+
+    unsigned int* d_prefix_sums;  // 存放相对位置索引
+    unsigned int d_prefix_sums_len = d_in_len;
+    checkCudaErrors(cudaMalloc(&d_prefix_sums, sizeof(unsigned int) * d_prefix_sums_len));
+    checkCudaErrors(cudaMemset(d_prefix_sums, 0, sizeof(unsigned int) * d_prefix_sums_len));
+
+    unsigned int* d_block_sums;  // 统计每个线程块的各个桶的数量
+    unsigned int d_block_sums_len = 4 * grid_sz; // 4-way split
+    checkCudaErrors(cudaMalloc(&d_block_sums, sizeof(unsigned int) * d_block_sums_len));
+    checkCudaErrors(cudaMemset(d_block_sums, 0, sizeof(unsigned int) * d_block_sums_len));
+
+    unsigned int* d_scan_block_sums;  // 每个线程块各个桶的数量的前缀和
+    checkCudaErrors(cudaMalloc(&d_scan_block_sums, sizeof(unsigned int) * d_block_sums_len));
+    checkCudaErrors(cudaMemset(d_scan_block_sums, 0, sizeof(unsigned int) * d_block_sums_len));
+
+    // shared memory consists of 3 arrays the size of the block-wise input
+    // and 2 arrays the size of n in the current n-way split (4)
+    unsigned int s_data_len = max_elems_per_block;  // 存放数据, 每个线程对应一个数据
+    unsigned int s_mask_out_len = max_elems_per_block + 1;  // 
+    unsigned int s_merged_scan_mask_out_len = max_elems_per_block;
+    unsigned int s_mask_out_sums_len = 4; // 4-way split
+    unsigned int s_scan_mask_out_sums_len = 4;
+    unsigned int shmem_sz = (s_data_len 
+                            + s_mask_out_len
+                            + s_merged_scan_mask_out_len
+                            + s_mask_out_sums_len
+                            + s_scan_mask_out_sums_len)
+                            * sizeof(unsigned int);
+
+
+    // for every 2 bits from LSB to MSB:
+    //  block-wise radix sort (write blocks back to global memory)
+    for (unsigned int shift_width = 0; shift_width <= 30; shift_width += 2)
+    {
+        // 每个 block 上进行排序得到最终的结果
+        gpu_radix_sort_local<<<grid_sz, block_sz, shmem_sz>>>(d_out, 
+                                                            d_prefix_sums, 
+                                                            d_block_sums, 
+                                                            shift_width, 
+                                                            d_in, 
+                                                            d_in_len, 
+                                                            max_elems_per_block);
+
+
+        // scan global block sum array, 四路分别进行规约
+        sum_scan_blelloch(d_scan_block_sums, d_block_sums, d_block_sums_len);
+
+        // scatter/shuffle block-wise sorted array to final positions
+        gpu_glbl_shuffle<<<grid_sz, block_sz>>>(d_in,
+                                                d_out, 
+                                                d_scan_block_sums, 
+                                                d_prefix_sums, 
+                                                shift_width, 
+                                                d_in_len, 
+                                                max_elems_per_block);
+    }
+
+    checkCudaErrors(cudaMemcpy(d_out, d_in, sizeof(unsigned int) * d_in_len, cudaMemcpyDeviceToDevice));
+    checkCudaErrors(cudaFree(d_scan_block_sums));
+    checkCudaErrors(cudaFree(d_block_sums));
+    checkCudaErrors(cudaFree(d_prefix_sums));
+}
+```

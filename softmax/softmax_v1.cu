@@ -1,4 +1,4 @@
-// 一般都是使用 safe_sotmax
+// 一般都是使用 safe_softmax
 // Softmax: half -> float -> half, {M, N}, N ~ (256, 1024)
 #include <iostream>
 #include <vector>

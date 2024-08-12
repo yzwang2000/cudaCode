@@ -46,6 +46,22 @@ __global__ void kernel_C(int *d_s, int *d_o){
 
 }
 
+// __global__ void kernel_test(int *d_s, int *d_o)
+// {
+//     int tid = threadIdx.x;
+//     for(int i=2*tid; i<((num_per_block>>1)<<1); i+=2*blockDim.x)
+//     {
+//         *reinterpret_cast<int2*>(&d_o[i]) = *reinterpret_cast<int2*>(&d_s[i]);
+//     }
+//     int rem = num_per_block & 1;   // 余数
+//     int quo = num_per_block >> 1;  // 商
+
+//     if(tid < rem)
+//     {
+
+//     }
+// }
+
 int main(){
     // host 分配内存
     int *h_s = (int*)malloc(N*sizeof(int));
