@@ -12,11 +12,12 @@ constexpr int K_TILE = 16;
 constexpr int N_TILE = 16;
 constexpr int warpSize = 32;
 
-// 填充 0 对我的结果是没有影响的
+// 填充 0 对计算的结果是没有影响的
 inline int padding(int x, int tile) {
     return x % tile ? (x / tile + 1) * tile : x;
 }
 
+// 第一个易错点是 A 和 B 均是 half* 的形式
 __global__ void gemm_kernel(half *A, half *B, float *C, int M_PAD, int K_PAD, int N_PAD) {
     int idx = (blockIdx.x * blockDim.x + threadIdx.x) / warpSize;  // 当前的 warp ID
     int mwarp = M_PAD / M_TILE;  // 竖直方向需要的 warp 数量
@@ -27,9 +28,11 @@ __global__ void gemm_kernel(half *A, half *B, float *C, int M_PAD, int K_PAD, in
     int nidx = idx % nwarp;
     int midx = idx / nwarp;
 
+    // 第二个易错点, matrix_a 和 matrix_b 都是需要指定 row_major, 而 accumulator 是不需要指定的(因为这个只需要一个累加的操作, 不需要从全局内存中读取)
     wmma::fragment<wmma::matrix_a, M_TILE, N_TILE, K_TILE, half, wmma::row_major> afrag;
     wmma::fragment<wmma::matrix_b, M_TILE, N_TILE, K_TILE, half, wmma::row_major> bfrag;
     wmma::fragment<wmma::accumulator, M_TILE, N_TILE, K_TILE, float> abfrag;
+    // 第三个易错点, abfrag 是不错需要指定 row_major, 但是需要填充为 0
     wmma::fill_fragment(abfrag, 0.0f);
 
     int niter = K_PAD / K_TILE;
@@ -40,6 +43,7 @@ __global__ void gemm_kernel(half *A, half *B, float *C, int M_PAD, int K_PAD, in
     }
 
     float *cptr = C + midx * M_TILE * N_PAD + nidx * N_TILE;
+    // 第三个易错点, 当将 abfrag 的结果存储到其他存储器时, 需要指定 mem_row_major
     wmma::store_matrix_sync(cptr, abfrag, N_PAD, wmma::mem_row_major);  // 修正参数
 }
 

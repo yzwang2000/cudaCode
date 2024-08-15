@@ -47,6 +47,7 @@ __global__ void gemm(float* __restrict__ A, float* __restrict__ B, float* __rest
         {
             // 每次将 smA 的 j 行读取到 regA 中
             // 每次将 smB 的 j 行读取到 regB 中
+            __syncthreads();
             for(int k=0; k<thread_m; ++k)
             {
                 for(int g=0; g<thread_n; ++g)

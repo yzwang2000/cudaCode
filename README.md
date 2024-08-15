@@ -6,7 +6,7 @@
 * `Nsight Compute` 对核函数的性能特性和瓶颈进行详细的分析。使用时主要关注: SM 的吞吐量, 依据 roofline model 分析当前核函数是属于计算密集型, 还是访存密集型, 估算核函数不同线程配置对 warp occupancy 的影响。L1 cache 和 L2 cache 的吞吐量和命中率。
 
 # Roofline Model 的介绍
-* Roofline Model 其实是说明模型在一个计算平台的限制下, 到底能够达到多快的浮点计算速度。具体来说解决的问题是 `计算量为A且访存量为B的模型在算力为C且带宽为D的计算平台所能达到的理论性能上限E是多少`。Roofline 划分出了计算瓶颈取余和贷款瓶颈区域。模型是实际表现一定是越贴近于边界越好的, 最理想的情况, 是实际表现达到拐点处。
+* Roofline Model 其实是说明模型在一个计算平台的限制下, 到底能够达到多快的浮点计算速度。具体来说解决的问题是 `计算量为A且访存量为B的模型在算力为C且带宽为D的计算平台所能达到的理论性能上限E是多少`。Roofline 划分出了计算瓶颈区域和贷款瓶颈区域。模型的实际表现一定是越贴近于边界越好的, 最理想的情况, 是实际表现达到拐点处。
 ![Roofline Model](./fig/roofline.png)
 
 # Reduce 优化 [原文](https://zhuanlan.zhihu.com/p/426978026)
@@ -126,7 +126,7 @@ __global__ void Kernel_B(int *d_s, int *d_o)
     if(tid==0) d_o[blockIdx.x] = sum;
 }
 ```
-* 对于第二种方法, 其实整体思路就是, 每个线程先将负责的那部分数据归约到总计的寄存器中, 然后 `warp` 内先进行一次规约, 规约的结果存储在每个 `warp` 的第一个线程中。然后再分配共享内存, 此时共享内存只需要再分配最多 32 个元素字节的大小(因为一个块内最多有 1024 个线程, 对应 32 个 `warp`)。但是这里有个问题, 就是得确定真正参与规约的每个块内有多少个 `warp`(确定个数来给共享内存32个无效的位置填充适当的数字)。最后再对这个 32 个共享内存数据进行规约, 这里使用的方法是, 每个块内 0 号 `warp` 读取这 32 个值, 然后再来一次 warp 内的规约。其实也可以像第一种方法一样, 直接操作共享内存(这里涉及到需要给共享内存写没用到的值, 或者依据线程个数只规约想要的部分)。
+* 对于第二种方法, 其实整体思路就是, 每个线程先将负责的那部分数据归约到自己的寄存器中, 然后 `warp` 内先进行一次规约, 规约的结果存储在每个 `warp` 的第一个线程中。然后再分配共享内存, 此时共享内存只需要再分配最多 32 个元素字节的大小(因为一个块内最多有 1024 个线程, 对应 32 个 `warp`)。但是这里有个问题, 就是得确定真正参与规约的每个块内有多少个 `warp`(确定个数来给共享内存32个无效的位置填充适当的数字)。最后再对这个 32 个共享内存数据进行规约, 这里使用的方法是, 每个块内 0 号 `warp` 读取这 32 个值, 然后再来一次 warp 内的规约。其实也可以像第一种方法一样, 直接操作共享内存(这里涉及到需要给共享内存写没用到的值, 或者依据线程个数只规约想要的部分)。
 
 ## PTX 与 SASS 的区别
 * CUDA 的汇编语言分成两种, 一种是 Parallel Thread Execution(PTX), 另一种是 Streaming Assembly(SASS)。SASS 指令集与 GPU 架构是有直接的联系的, 是机器码的指令集合, 编译 SASS 的 GPU 架构与当前 GPU 架构不对应的话是不能运行的。PTX 是从 SASS 抽象出来的更上层的软件编程模型, 介于 CUDA C 和 SASS 之间, 与硬件架构有比较弱的耦合性。
@@ -738,7 +738,7 @@ std::cout << "multiple stream letancy: " << letancy << " ms" << std::endl;
 
 ## radix_sort 优化(GTC 2020, 在2009年牛津大学的一篇论文上改进的)
 ### cpu 端写法
-* 基数排序(radix sort) 属于分配式排序, 又称 bin sort。透过键值的部分信息, 将要排序得元素分配到某些桶中, 达到排序得作用。基数排序法的效率高于其他稳定性的排序算法。
+* 基数排序(radix sort) 属于分配式排序, 又称 bin sort。透过键值的部分信息, 将要排序得元素分配到某些桶中, 达到排序的作用。基数排序法的效率高于其他稳定性的排序算法。
 * 基数排序是一种`非比较型整数`排序算法，其原理是将整数按位数切割成不同的数字，然后按每个位数分别比较。由于整数也可以表达字符串（比如名字或日期）和特定格式的浮点数，所以基数排序也不是只能使用于整数。
 * 时间复杂度为 `O(n*k)`, 空间复杂度为 `O(k)`。其中 `n` 是需要比较的位数, `k` 是桶的个数(k 其实是每一位有多少种状态)。而且算法是稳定的。由于 k 是固定的, 所以其时间复杂度是线性的。
 ![Roofline Model](./fig/radix-sort.png)
@@ -896,3 +896,82 @@ void radix_sort(unsigned int* const d_out,
     checkCudaErrors(cudaFree(d_prefix_sums));
 }
 ```
+
+## YOLOv5 推理优化
+* 预处理部分: yolov5 中的预处理主要由以下三个部分组成:  [B, srcH, srcW, srcC] -> [B, tarC, tarH, tarW]
+    - Scale: 直接 Resize 和 LetterBox(保持原图比例, 将图片放到一个正方形的画布中, 多余部分用黑色填充。)
+    - Normalization: 归一化, 将像素值(unsigned char)缩放到 [0, 1] 间。
+    - BGR2RGB: 颜色通道顺序调整。
+    - BHWC->BCHW: 改变特征通道顺序。
+    前两个操作其实是必须要经过的步骤, 后两个问题是因为 `OpenCV` 库导致的。
+* 对预处理部分优化的思路是
+    - 按照目标图像来分配线程, 每个元素对应个一个线程。`dim3 block(16, 16, 1); dim3 grid((tarW+16-1)/16, (tarH+16-1)/16, 3);`
+    - 首先获取比率, `scale_w= srcW/tarW, scale_h=srcH/tarH`。处理每个线程的时候, 得到每个线程在目标图中的长 y_id 和宽 x_id, 然后计算其在目标图中的位置 `src_x1 = floor(x_i*scale_w), src_y1 = floor(y_i*scale_h)`, 其中 floor 是为了取到左上角的点。然后 `(src_x1+1, src_y1+1)` 就是其右下角的点。
+    - 定位到这个点在原始图中的像素和在目标图中的位置，然后加权平均得到。
+* 后处理部分: yolov5 COCO 预训练模型导出 ONNX, 可以查看到 3 个 head(shape 分别是 [255, 80, 80], [255, 40, 40], [255, 20, 20]), 经过 decode 得到最终的输出 output([25200, 85]), 再经过 NMS 就可以得到最终的检测框。一共是 9 个 anchor, 每个 head 对应 3 种 anchor。所以是 [255, 80, 80] 可以转换为 [3, 85, 80, 80]([3, (tx, ty, tw, th, score, [0, 0, 1,...,0,0,0]), 80, 80])。
+* 对后处理优化是思路是:
+    - 先循环特征图, 然后再循环head。相当于最后的结果为 [batch1_layer1, batch2_layer1, batch1_layer2, batch2_layer2, batch1_layer3, batch2_layer3]
+    - 线程组织形式是, `dim3 block(16, 16, 1);  dim3 grid(featureW/block.x, featureH/block.y, numAnchors/block.z);  numAnchors 是每个 head 对应的 anchor 个数`
+    - kernel 的逻辑是: 依据每个位置对应的 score, 确定是否要处理, 处理的话就让原子操作 value + 1; 处理的话, 就是取得其在网格中的 x, y 和 对应 anchor 长宽和缩放比例来处理; 每个线程还要进行一次排序, 找到最大的类别是什么; 最后依据原子操作的值, 将其放到对应的位置。
+
+## 全局内存管理
+* 全局内存的分配与释放(其实全局内存的分配与释放是没有什么花样的, 都是固定的函数, 有花样的是 host 端内存)
+```C++
+// 全局内存分配
+// count : 所分配全局内存的字节 
+// devptr：指针返回该内存的地址
+cudaError_t cudaMalloc(void **devPtr, size_t count);
+
+// 全局内存的释放
+cudaError_t cudaFree(void *devPtr); 
+```
+* host 端与 device 端内存的传输(分为同步传输和异步传输)
+```C++
+// 同步传输
+cudaMemcpy(void *dst, const void *src, size_t count, enum cudaMemcpyKind kind);
+
+// 异步传输
+cudaMemcpyAsync(void *dst, const void *src, size_t count, enum cudaMemcpyKind kind, cudaStream_t stream);
+
+/*
+    * 函数从内存位置 src 复制 count 字节到内存位置 dst
+    * kind 表示内存传输方向(要与src到dst保持一致)
+        kind取值：
+        cudaMemcpyHostToHost
+        cudaMemcpyHostToDevice
+        cudaMemcpyDeviceToHost
+        cudaMemcpyDeviceToDevice
+    * 注意同步传输的时候, 主机内存可以是分页内存和页锁定内存。而异步传输的时候，主机内存必须是页锁定内存。
+*/
+```
+* 分页内存和页锁定内存。对于主机端而言，malloc 和 new 分配的都是分页内存。可能被操作系统调度机制交换到硬盘上，导致无法保证 GPU 访问的持续性和稳定性。当可分页内存传输到设备内存时，CUDA会先分配固定的主机内存，将可分页数据拷贝到固定内存(页锁定内存)中，然后再将固定内存传输数据给设备内存。也可以直接分配页锁定内存。锁页内存能够确保内存一直驻留在物理内存中，这使得 GPU 可以直接通过 DMA（直接内存访问）来快速访问这些数据，允许 cudaMemcpyAsync 等异步函数在传输过程中不阻塞 CPU 的执行。
+* 固定内存能被设备直接访问，所以比可分页内存进行更高带宽读写。但分配过多的固定内存可能会降低主机系统的性能，同时固定内存的分配和释放成本更高。
+```C++
+// 页锁定内存分配
+cudaError_t cudaMallocHost(void **devPtr, size_t count);
+cudaError_t cudaHostAlloc(T **ptr, size_t size, unsigned int flags)
+
+// 页锁定内存释放
+cudaError_t cudaFreeHost(void *ptr);
+```
+* 零拷贝内存(也叫 mapped pinned memory)。GPU 线程可以直接访问零拷贝内存, 这部分内存在主机端一定是页锁定内存。
+```C++
+// 零拷贝内存的分配
+cudaError_t cudaHostAlloc(void **pHost, size_t count, unsigned int flags);
+/*
+    flags 有以下情况:
+    cudaHostAllocDefault: 默认分配策略, 默认分配普通的页锁定内存, 不会为 GPU 提供直接访问能力。
+    cudaHostAllocPortable: 分配的内存可以跨不同的 GPU 设备, 意味着在一个设备上分配的内存可以在多个设备之间使用, 适用于多 GPU 环境。但并不意味着分配的主机内存能够被多个 GPU 直接访问。它的实际含义是，这段内存可以跨多个 CUDA 上下文（contexts）共享使用。
+    cudaHostAllocMapped: 分配的主机内存是映射的, 允许 GPU 直接访问, 减少了主机和设备之间的数据拷贝开销。
+*/
+
+// 零拷贝内存的释放, 其实就是页锁定内存的释放函数
+cudaError_t cudaFreeHost(void *ptr); 
+
+// 就是需要注意, 零拷贝虽然不需要显示地传递到设备上, 但是设备不能通过 pHost 直接访问对应的内存地址, 设备需要访问主机上的零拷贝内存, 需要先获得另外一个地址,这个地址帮助设备访问到主机对应的内存。
+cudaError_t cudaHostGetDevicePointer(void ** pDevice,void * pHost,unsigned flags);  //这里将flags设置为0
+```
+* NVIDIA Drive series 和 NVIDIA Jetson series 都是统一内存的, 即 GPU 和 CPU 都是使用相同的一块物理内存。通常可以利用零拷贝消除在独立 CPU 和 GPU 系统中 host->device 的内存拷贝花销。
+* 在 CPU 和 GPU 使用同一块物理内存的系统中, 使用零拷贝内存(mapped pinned memory) 是非常有效的。真正能够消除内存拷贝的动作。
+* 而在独立的 CPU 和 GPU 的内存系统中, 零拷贝内存相比于普通的页锁定内存来说(non-mapped pinned memory)速度能有 15% 左右的增幅。
+* 统一虚拟寻址(UVA)的内存机制, 即设备端和主机端共享同一个地址空间。这样的话cudaHostAlloc函数分配的固定主机内存具有相同的主机和设备地址，可以直接将返回的地址传递给核函数。那么cudaHostGetDevicePointer这个函数基本没啥用了。

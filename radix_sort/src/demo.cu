@@ -17,11 +17,15 @@ void launch_radix_sort(unsigned int* d_in, unsigned int* d_out){
         // 每个 block 内进行一次局部 radix sort, 得到 d_prefix_sums 和 d_block_sums
         radix_sort_local<<<num_block_each_grid, num_thread_each_block>>>();
         // 通过 d_scan_block_sums 得到 d_block_sums
-        sum_scan_blelloch();
+        sum_scan();
         // 得到 d_in 中每个元素的新坐标, 然后进行变换过去
-        gpu_glbl_shuffle<<<>>>(d_in, d_out);
+        global_shuffle<<<>>>(d_in, d_out);
     }
 }
+
+// d_prefix_sums
+// d_block_sums
+// d_scan_block_sums
 
 int main(){
 
