@@ -36,6 +36,25 @@ void radixSort(std::vector<unsigned int>& inputVals, int numBits = 2) {
     }
 }
 
+std::vector<int> quickSort(vector<int>&nums, int start, int end)
+{
+    if (start >= end) return nums;
+    int base = nums[start];
+    int i = start;
+    int j = end;
+    while (i < j)
+    {
+        while (i < j && nums[j] >= base) j--; //从右往左，寻找比base小的数
+        swap(nums[i], nums[j]); //找到比base小的数，即与base交换位置
+        while (i < j && nums[i] <= base) i++; //从左往右，寻找比base大的数
+        swap(nums[i], nums[j]); //找到比base大的数，即与base交换位置
+    }
+    quickSort(nums, start, i - 1);
+    quickSort(nums, i + 1, end);
+    return nums;
+}
+
+
 int main() {
     std::vector<unsigned int> inputVals = {170, 45, 75, 90, 802, 24, 2, 66};
     radixSort(inputVals, 2);

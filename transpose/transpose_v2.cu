@@ -74,7 +74,7 @@ int main(){
     cudaMemcpy(d_o, h_o, matrix_bytes, cudaMemcpyHostToDevice);
 
     dim3 grid(N/block_size_N, M/block_size_M, 1);  // (512/32, 1024/64) = (16, 16)
-    dim3 block(32, 16, 1);  // 使用 16 个 warp
+    dim3 block(32, 16, 1);                         // 使用 16 个 warp
 
     Kernel_A<block_size_M, block_size_N><<<grid, block>>>(d_i, d_o, M, N);
 

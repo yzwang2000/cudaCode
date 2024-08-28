@@ -28,7 +28,8 @@ __global__ void gemm_kernel(half *A, half *B, float *C, int M_PAD, int K_PAD, in
     int nidx = idx % nwarp;
     int midx = idx / nwarp;
 
-    // 第二个易错点, matrix_a 和 matrix_b 都是需要指定 row_major, 而 accumulator 是不需要指定的(因为这个只需要一个累加的操作, 不需要从全局内存中读取)
+    // 第二个易错点, matrix_a 和 matrix_b 都是需要指定 row_major, 
+    // 而 accumulator 是不需要指定的(因为这个只需要一个累加的操作, 不需要从全局内存中读取)
     wmma::fragment<wmma::matrix_a, M_TILE, N_TILE, K_TILE, half, wmma::row_major> afrag;
     wmma::fragment<wmma::matrix_b, M_TILE, N_TILE, K_TILE, half, wmma::row_major> bfrag;
     wmma::fragment<wmma::accumulator, M_TILE, N_TILE, K_TILE, float> abfrag;

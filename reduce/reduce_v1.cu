@@ -3,11 +3,11 @@
 
 constexpr int N = 512000;
 constexpr int thread_per_block = 256;  // 每个块中包含的线程个数
-constexpr int num_per_block = 512;     // 每个处理的数据个数
+constexpr int num_per_block = 512;     // 每个 block 处理的数据个数
 constexpr int num_block_per_grid = N/num_per_block;
 
 // 在不使用 shuffle 的情况下, 进行规约操作, 需要 shared_memory
-// 因为除了 global memory 就剩下 shared_meory 可以做为线程之间通信的中介
+// 因为除了 global memory 就剩下 shared_meory, warp 通信可以做为线程之间通信的中介
 // 除了做为线程之间通信介质, 还得需要同步的操作. global_memory 也能进行同步操作 (__threadfence)
 __global__ void Kernel_A(int *d_s, int *d_o)
 {
@@ -52,6 +52,11 @@ __global__ void Kernel_A(int *d_s, int *d_o)
     if(tid==0) d_o[blockIdx.x] = tmp_sum[0];
 }
 
+// template<typename T>
+// __device__ int warpReduceSm(T vlaue, T(*op)(T, T))
+// {
+//     value = op(value, __shfl_xor_sync(0xffffffff, sum, 16));
+// }
 
 // 每个 warp 进行规约, 规约后的值在 warp 中的 0 号线程
 // __shfl_down_sync 相比于 __shfl_down 允许开发者指定一个线程掩码, 确保只有在指定的线程都完成数据交换后, 才继续执行后续的操作

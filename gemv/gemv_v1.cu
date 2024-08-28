@@ -23,7 +23,7 @@ __global__ void kernel_A(
     int bx = blockIdx.x;
 
     int per_thread_iter= N/(warpSize*4);  // 每个线程迭代的次数, 每个 warp 每次处理 warpSize * 4 的数据(向量化访存)
-    A = &A[N*blockDim.y*bx + N*ty];  // 当前 block 中的 thread 处理 A 的行数
+    A = &A[N*blockDim.y*bx + N*ty];       // 当前 block 中的 thread 处理 A 的行数
     int res=0; // 每个线程先将多次迭代的结果归约到自己的寄存器中
 
     for(int i=0; i<per_thread_iter; ++i)

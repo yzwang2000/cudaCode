@@ -6,11 +6,11 @@
 * `Nsight Compute` 对核函数的性能特性和瓶颈进行详细的分析。使用时主要关注: SM 的吞吐量, 依据 roofline model 分析当前核函数是属于计算密集型, 还是访存密集型, 估算核函数不同线程配置对 warp occupancy 的影响。L1 cache 和 L2 cache 的吞吐量和命中率。
 
 # Roofline Model 的介绍
-* Roofline Model 其实是说明模型在一个计算平台的限制下, 到底能够达到多快的浮点计算速度。具体来说解决的问题是 `计算量为A且访存量为B的模型在算力为C且带宽为D的计算平台所能达到的理论性能上限E是多少`。Roofline 划分出了计算瓶颈区域和贷款瓶颈区域。模型的实际表现一定是越贴近于边界越好的, 最理想的情况, 是实际表现达到拐点处。
+* Roofline Model 其实是说明模型在一个计算平台的限制下, 到底能够达到多快的浮点计算速度。具体来说解决的问题是 `计算量为A且访存量为B的模型在算力为C且带宽为D的计算平台所能达到的理论性能上限E是多少`。Roofline 划分出了计算瓶颈区域和带宽瓶颈区域。模型的实际表现一定是越贴近于边界越好的, 最理想的情况, 是实际表现达到拐点处。
 ![Roofline Model](./fig/roofline.png)
 
 # Reduce 优化 [原文](https://zhuanlan.zhihu.com/p/426978026)
-* reduce 算法也就是规约运算, 本质上是 $ x = x_0 \otimes x_1 \otimes x_2 \cdots \otimes x_n $。在并行计算中通常采用树形的及计算方式。比如计算长度为 $N$ 的数组的所有元素之和。首先将数组分成 $m$ 个小份, 开启 $m$ 个 block 计算出 $m$ 个小份的 reduce 的值。接下来再使用一个 block 将 $m$ 个小份再次进行 reduce, 得到最终的结果。
+* reduce 算法也就是规约运算, 本质上是 $ x = x_0 \otimes x_1 \otimes x_2 \cdots \otimes x_n $。在并行计算中通常采用树形的计算方式。比如计算长度为 $N$ 的数组的所有元素之和。首先将数组分成 $m$ 个小份, 开启 $m$ 个 block 计算出 $m$ 个小份的 reduce 的值。接下来再使用一个 block 将 $m$ 个小份再次进行 reduce, 得到最终的结果。
 ![reduce](./fig/reduce.jpg)
 * 对于线程模型的分配, 线程模型的块的个数尽量给到 `SM` 个数的整数倍, 一个块内线程的个数通常是 `128, 256, 512, 1024`。在线程与元素一一对应不能满足的时候, 通常先满足块的个数是整数的要求, 然后再分配适当的线程, 使用 `块跨步` 的方法使得一个线程块的线程能够遍历完分配其的所有数据。进行一个 block 内规约的方法通常有两种, 第一种方法如下所示:
 ```C++
@@ -68,6 +68,37 @@ __global__ void Kernel_A(int *d_s, int *d_o)
     * 先把每个块规约的结果写到全局内存中, 然后利用 `一个块` 对这些数据进行规约(两步规约的办法)。
 * 第二种方法如下所示:
 ```C++
+#define FINAL_MASK 0xffffffff
+
+template <typename T>
+__inline__ __device__
+T warpReduceSum(T val)
+{
+  for(int mask = 16; mask > 0; mask >>= 1)
+    val += __shfl_xor_sync(FINAL_MASK, val, mask, 32);
+  return val;
+}
+
+template <typename T>
+__inline__ __device__
+T blockReduceSum(T val)
+{
+  static __shared__ T shared[32]; 
+  int lane = threadIdx.x & 0x1f;  // 相当于取余
+  int wid = threadIdx.x >> 5;  
+
+  val = warpReduceSum<T>(val);
+
+  if(lane == 0)
+    shared[wid] = val;
+  __syncthreads();
+
+  val = (threadIdx.x < (blockDim.x >> 5 )) ? shared[lane] : (T)0.0f;
+  val = warpReduceSum(val);
+
+  return val;  // 返回是都要返回的, 只不过只有部分线程的值为想要的值
+}
+
 // 每个 warp 进行规约, 规约后的值在 warp 中的 0 号线程
 // __shfl_down_sync 相比于 __shfl_down 允许开发者指定一个线程掩码, 确保只有在指定的线程都完成数据交换后, 才继续执行后续的操作
 __device__ int warpReduceSum(int sum)
@@ -133,6 +164,13 @@ __global__ void Kernel_B(int *d_s, int *d_o)
 * 看生成汇编代码的目的是, 做完优化以后, 我们要判断机器是否能够真正地按照我们设想的模式运行。使用 float4 后, GPU 是否真正使用了向量化的指令。采用循环展开后, GPU 是否真正地会进行展开。
 * 对于访存密集型的 `kernel`, 主要关注有没有采用 `LDG.128` 的访存指令, `#pragma unroll` 是否有效展开了, 计算指令占比是不是不太多。对于计算密集型的 `kernel`, 重点关注计算指令的占比。如果并行策略不太行，那么计算指令的占比会很低，这样的话，访存所导致的 latency 很难被计算指令掩盖，计算效率会非常差。如果并行策略比较好，那么计算指令的占比也会非常地高。也只有当计算指令占比非常高的时候，才有可能地去逼近峰值性能。
 * CUDA 微架构和指令集是两个重要的概念。CUDA 的微架构一般指的是 `SM` 的架构。指令集是 GPU 执行的机器码(SASS)。PTX 是构建在 SASS 上的虚拟中间代码指令集(PTX 与 `SM` 架构只有比较弱的耦合关系)。SM 架构的设计决定了指令集(SASS)所支持的指令形式(SASS 与 `SM` 是直接对应关系)。
+
+## CUDA 代码的编译流程
+* 在 CUDA 编程模型中，CUDA 代码会在主机端（Host）用 nvcc 编译器编译生成适合 GPU 执行的机器指令，然后再发送给 GPU 执行。主要分成以下几个部分:
+    - 预处理。处理头文件的包含(`#include`), 宏定义(`#define`), 条件编译(`#if`)
+    - 分离主机代码和 CUDA 代码。nvcc 编译器会将 CUDA 代码(CUDA代码主要是包含 `__global__` 和 `__device__` 等修饰符的代码段)与主机代码分离。
+    - 编译和汇编。nvcc 调用C++编译器(g++)对C++代码进行编译, 生成目标文件(.o)。nvcc 将CUDA代码编译成PTX代码或再次使用 ptxas 编译器 将 ptx 编译成二进制的 SASS 代码。
+    - 链接阶段。nvcc 会将主机目标文件、CUDA目标文件、CUDA运行时库链接在一起, 最终生成可执行文件。
 
 ## 向量化内存访问 [原文](https://zhuanlan.zhihu.com/p/572817996)
 * 硬件的 FLOPS 与带宽比例不断增加, 使得很多 CUDA 内核都是受带宽限制的。使用向量化访存可以减少访存指令, 指令 cache 里能够存下更多指令, 提高指令 cache 的命中率, 提高带宽利用率。
@@ -315,7 +353,7 @@ __global__ void stride(T* a, int s)
 * 在早期的 CUDA 硬件中, 全局内存的对齐访问和跨步访问对带宽都有比较大的影响。但是在最近的硬件上, 对齐访问并不是大的问题(因为缓存的出现)。如果不可避免的要出现对全局内存的跨步访问, 可以先逐行的将数据读取到共享内存中, 然后再使用跨步访问的办法(这时候要注意一个 warp 中是否存在 bank 冲突)。对于共享内存的访问，通常不会像全局内存一样涉及到内存事务，而是直接通过存储器的端口进行访问。因此，共享内存的访问模式不同于全局内存，不需要考虑内存事务的问题。但是，仍然需要注意bank冲突的问题，以最大程度地利用共享内存的带宽和性能。
 
 ## transpose 优化 [原文](https://zhuanlan.zhihu.com/p/568769940)
-* 矩阵转置的优化, 主要是考虑全局内存合并访问的的问题。最简单实现矩阵的转置是针对全局内存上的输入矩阵分块逐行读取, 然后再对全局内存上的输出矩阵逐列写入。全局内存的逐行读取能够全局内存合并访问的特性, 但是逐列的写入, 就是非常低效了, 最长情况, warp 中的每个线程都需要一次内存事务。解决的办法是从全局内存中逐行地读取元素到共享内存中, 然后逐列的读取共享内存的数据, 逐行的写入到全局内存中(其中要注意 bank 冲突的问题, 通过填充解决)。
+* 矩阵转置的优化, 主要是考虑全局内存合并访问的的问题。最简单实现矩阵的转置是针对全局内存上的输入矩阵分块逐行读取, 然后再对全局内存上的输出矩阵逐列写入。全局内存的逐行读取能够全局内存合并访问的特性, 但是逐列的写入, 就是非常低效了, 最差情况, warp 中的每个线程都需要一次内存事务。解决的办法是从全局内存中逐行地读取元素到共享内存中, 然后逐列的读取共享内存的数据, 逐行的写入到全局内存中(其中要注意 bank 冲突的问题, 通过填充解决)。
 * 这里是将输入矩阵进行分块, 每个块的大小为 `block_size_M` 和 `block_size_N`。然后让每个线程块, 负责每个数据块。数据块的长和宽最好是 `32` 的整数倍(比较好分配线程)。
 ```C++
 // 32*16 大小的线程块要操作 block_size_m*block_size_n 大小的数据块
@@ -561,7 +599,7 @@ void recursive_scan(int *d_data, int *d_prefix_sum, int N, bool bcao)
 ```
 ## Reduced Precision
 ![reduced precision](./fig/reduced_percision.jpg)
-* `fp16 bf16` 相对于 `float` 有着更低的位数, 是为了在满肚一定精度要求的前提下，尽可能地减少存储空间和计算成本。
+* `fp16 bf16` 相对于 `float` 有着更低的位数, 是为了在满足一定精度要求的前提下，尽可能地减少存储空间和计算成本。
 * `tf32` 与 `float` 相比能够提供相似的计算精度(因为指数相同), 但是具有更高的计算性能和存储成本。
 * 在编译含有 FP16 的 `kernel` 时，必须要计算力大于等于 `5.3` 的 `GPU` 来启用 `FP16` 支持。GTX1050 之前的GPU不支持, Tesla K 和 M 系列也不支持。
 * cuda 中使用 `fp16` 的一些注意事项:
@@ -897,6 +935,37 @@ void radix_sort(unsigned int* const d_out,
 }
 ```
 
+## 快速排序算法
+* 通过一趟排序将待定元素分成独立的两个部分, 其中一个部分记录的元素比另一个部分记录的元素要小。然后分别对这两个部分继续进行排序, 直到整个序列有序为止。平均时间复杂度为 `O(nlogn)`, 最坏时间复杂度为 `O(n^2)`, 是不稳定的排序算法。具体做法如下:
+    - 选取基准元素base(选取首元素即可)
+    - 以基准元素为基准, 将小于基准元素的放在前面, 大于基准元素的方法后面(实现方法, 就是交换 std::swap)。
+    - 以基准元素为界限, 分成两组数据。进行递归再排序。
+* 整体思路就是一个递归的方法, 使用 `引用&` 直接改变顺序。单次逻辑中 i 和 j 分别指向 start 和 end。当 `i < j` 时, 就一直来交换。因为选取首元素为 base, 所以先判断 j, 交换一次到 i。再从 i 判断, 交换到 j。依据 base 分成了两半, 然后再从这两半来进行遍历。
+```C++
+std::vector<unsigned int> quickSort(std::vector<unsigned int>&nums, int start, int end)
+{
+    // 注意这里的 start 和 end 都是左闭右闭
+    // start >= end 时候, 这个部分就排序结束啦
+    if (start >= end) return nums;
+
+    int base = nums[start];  // 选择最开始的当作 base
+
+    int i = start;
+    int j = end;
+    while (i < j)  // i 和 j 重合以后, 这段就排序完了
+    {
+        while (i < j && nums[j] >= base) j--; //从右往左，寻找比base小的数
+        std::swap(nums[i], nums[j]);          //找到比base小的数，即与base交换位置, 即使 i == j 也不影响。
+        while (i < j && nums[i] <= base) i++; //从左往右，寻找比base大的数
+        std::swap(nums[i], nums[j]);          //找到比base大的数，即与base交换位置
+    }
+    quickSort(nums, start, i - 1);  // 分成两个部分来再次排序
+    quickSort(nums, i + 1, end);    // 分成两个部分来再次排序
+
+    return nums;
+}
+```
+
 ## YOLOv5 推理优化
 * 预处理部分: yolov5 中的预处理主要由以下三个部分组成:  [B, srcH, srcW, srcC] -> [B, tarC, tarH, tarW]
     - Scale: 直接 Resize 和 LetterBox(保持原图比例, 将图片放到一个正方形的画布中, 多余部分用黑色填充。)
@@ -975,3 +1044,44 @@ cudaError_t cudaHostGetDevicePointer(void ** pDevice,void * pHost,unsigned flags
 * 在 CPU 和 GPU 使用同一块物理内存的系统中, 使用零拷贝内存(mapped pinned memory) 是非常有效的。真正能够消除内存拷贝的动作。
 * 而在独立的 CPU 和 GPU 的内存系统中, 零拷贝内存相比于普通的页锁定内存来说(non-mapped pinned memory)速度能有 15% 左右的增幅。
 * 统一虚拟寻址(UVA)的内存机制, 即设备端和主机端共享同一个地址空间。这样的话cudaHostAlloc函数分配的固定主机内存具有相同的主机和设备地址，可以直接将返回的地址传递给核函数。那么cudaHostGetDevicePointer这个函数基本没啥用了。
+
+## DMA 介绍
+* DMA (Direct Memory Access) 即直接存储访问, 借助内部的控制器来实现内存和外设之间的数据传输。有了 DMA, CPU 可以专注于内存数据的存取, 外设数据的搬运过程久交给 DMA 硬件完成。
+* DMA 的优势有那些:
+    - 降低 CPU 的使用率。 不需要 CPU 的干预就可以服务于外设, 这样 CPU 就可以去处理别的事物, 提高系统效率。
+    - 提高设备的吞吐能力。DMA 有块传输和单字传输很多种传输方式, 而CPU通过总线传输，一个时钟周期最多存取一次总线，所以使用DMA能使设备的吞吐能力大为增强。
+* 其实为什么异步拷贝的时候，需要分配页锁定内存。就是因为只有页锁定内存才能使用 DMA 来进行内存和device的异步传输（不阻塞CPU）。
+
+## CUDA Graph
+* CUDA 中启动 kernel 的时候会有一定的开销, 这种开销主要来自以下几个方面:
+    - 主机与设备之间的通信(主要耗时)。启动 kernel 时候, 主机需要通过驱动程序将指令发送到GPU(设备), 这就涉及到主机与设备之间的通信, 会产生一定的延迟(CUDA代码会在 host 端通过 `nvcc` 编译器生成适合的 GPU 执行机器指令, 然后发送给 GPU 执行)。
+    - 硬件资源的调度。GPU 在执行 kernel 之前, 需要调度线程块、寄存器、共享内存。这些调度涉及到GPU内部的硬件管理, 需要一定时间完成资源分配和调度。
+    - 参数解析的开销。驱动程序需要对 kernel 参数进行解析和传递, 这也会引入一定的开销。
+* 随着 GPU 算力的提升, 计算任务的执行时间在慢慢的缩小, 一个 GPU 执行单元可能在 us 或者 ms 级别完成。通常一个好的 kernel 运算时间应该长一些, 从而使 GPU 的性能更好地发挥。因为启动 kernel 也是有开销的, 通常是 0.x us。所以如果业务场景中有很多小 us 级别的 kernel 要执行, 整个系统的性能会随着短 kernel 比例增加整体性能输出越来越差。
+* CUDA Graph 可以通过 Capture 或 Create 的方式将多个 kernel 组合在一起生成一个 Graph。与 kernel 融合不同, Graph 内仍然是多个 kernel 的形式存在, 但是启动操作只需要一次。如果将尽可能多的 kernel 组合在一起, 理论上能够节约很多 kernel 提交的开销。但是 CUDA graph 的限制如下:
+    - CUDA graph 的参数和结构是固定的, 通常难以变换。
+    - 实例化这个 graph 是比较耗时的, 但是这个快照被反复执行(replay)足够多的次数, 实例化 graph 的时间是可以忽略不计的。
+* 总结一下就是: CUDA Graph 通过组合 Kernel 的方式可以将 Kernel 提交频率大幅降低，提高GPU的性能输出，但对于执行时间长的Kernel性能优化不明显。
+* CUDA graph 的使用方式：
+    - 定义。程序中创建图中操作的描述以及他们之间的依赖关系。
+    - 实例化(获取图模板的快照, 也称为可执行图)。执行大部分工作的设置和初始化, 最大限度的减少启动时需要完成的工作。
+    - 在流中启动可执行图。可以在不重复实例化的情况下启动任意多次。
+* CUDA graph 创建方式(显示API 和 流捕获的方式):
+    - 定义 graph 和 graphExec。
+    - 通过捕获提交到 `cudaStreamBeginCapture` 和 `cudaStreamEndCapture` 调用之间流的 GPU 活动来创建 graph。
+    - 调用 `cudaStreamInstantiate` 创建 graphExec, 来创建并预初始化所有内核工作描述, 以便他们尽可能的重复启动。
+    - 最后通过调用 `cudaGraphLaunch` 将 graphExec 加入到指定的流中。
+
+## Byte Transformer [原文](https://zhuanlan.zhihu.com/p/656342974)
+* Byte Transformer 是针对自然语言处理常见的可变长输入, 论文提出了一套优化算法, 在保证正确性的前提下, 成功避免了传统实现中的冗余计算。其实 Transformer 更适合于处理 BERT 这种 encoder-decoder 的大语言模型。
+* Byte Transformer 的创新之处主要在于以下几点:
+    - padding-free 的方法, 将变长的输入张量打包, 并计算 bach_seq_offset 和 wordIdx, 避免填充和 padding token 的计算。
+    - 融合 MHA(Multi-Head Attention), 减少 MHA 中间矩阵的内存开销, 也利用 WMMA 使用 TensorCore 进行加速。
+* paddfing-free:
+    - 在整个 Transformer 的结构中, 其实只有在进行求 $softmax(Q\times K^{T})\times V$ 的时候才要求多个 batch 中的句子长度是对齐的, 所以可以在计算这个之前进行 `fused rebuild padding & add bias`, 这里是 fused 是因为为了减小这个操作的影响, 将其与其他的操作进行融合。attention 运算完成之后, 再利用 `fused zero padding & transpose` 来去除 padding, 这里能够融合 transpose 是因为调用的 cublas 是列主序的(内存一定, 列主序就是行主序的转置)。
+* 融合 MHA:
+    - 整体思路是依据 `seq_len` 的大小来分别撰写不同的 kernel 来减少中间矩阵的存储。当 `seq_len<80` 时(80应该是依据硬件的 shared_memory 的大小得来的), 将 Q, K, V 全部加载到 shared_memory 中, 利用 WMMA 来调用 TensorCore 来加快 attention 的计算, V 复用 K 的shared_memory。当 `seq_len > 80` 时, 分段将 Q 加载到 shared_memory, K 仍然是全部加载, V 复用 K 的 shared_memory。
+
+## PagedAttention
+* 文中对 KV Cache 利用 PagedAttention 进行了显存的管理。主要是 CacheManager 类维护了 `block_table`, 数据类型是 `std::unordered_map<int64_t, std::vector<std::pair<int64_t, int64_t>>> block_table`。其中 key 是 batch(相当于每个batch 都有一个自己的映射表), value 是占用的内存块的序号数 和 使用的这个块的大小。还有一个数据成员是 `free_blocks`, 数据类型是 `std::set<int64_t>`, 存放的是空闲 block 的索引。
+* 维护了几个成员函数, 核心的成员函数是 `update`, 根据当前 next_token 的状态来判断是否还要继续增加新的 token 的 kv Cache。其中涉及到了某个 batch 生成结束, free 整个 batch 的显存。还有得到新的空闲的 block 索引(依据 free_blocks 来得到, 取出第一个, 并将其中元素删除掉)。
