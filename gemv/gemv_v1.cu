@@ -2,12 +2,13 @@
 #include <stdio.h>
 #include <iostream>
 
+#define FINAL_MASK 0xffffffff
+
 __device__ int warpReduce(int val){
-    val += __shfl_down_sync(0xffffffff, val, 16);
-    val += __shfl_down_sync(0xffffffff, val, 8);
-    val += __shfl_down_sync(0xffffffff, val, 4);
-    val += __shfl_down_sync(0xffffffff, val, 2);
-    val += __shfl_down_sync(0xffffffff, val, 1);
+    for(int mask=16; mask>=1; mask>>=1)
+    {
+        val += __shfl_down_sync(FINAL_MASK, val, mask, 32);
+    }
     return val;
 }
 
@@ -15,8 +16,7 @@ __global__ void kernel_A(
     float* __restrict__ A,
     float* __restrict__ x,
     float* __restrict__ y,
-    int M,
-    int N){
+    int M, int N){
     
     int tx = threadIdx.x;  // laneId
     int ty = threadIdx.y;  // warpId

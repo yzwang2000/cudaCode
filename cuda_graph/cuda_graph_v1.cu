@@ -1,7 +1,7 @@
 #include <cuda_runtime.h>
 #include <iostream>
 
-#define N 500000     // tuned such that kernel takes a few microseconds
+#define N 500000    // tuned such that kernel takes a few microseconds
 #define NSTEP 1000
 #define NKERNEL 20
 

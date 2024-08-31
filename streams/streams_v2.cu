@@ -36,7 +36,7 @@ inline void __getLastCudaError(const char *errorMessage, const char *file,
   }
 }
 
-__global__ void kernel_A(float*__restrict d_i, float*__restrict d_o, int offset)
+__global__ void kernel_A(float*__restrict__ d_i, float*__restrict__ d_o, int offset)
 {
     int idx = threadIdx.x + blockIdx.x * blockDim.x;
     float a = sinf(d_i[idx]+offset);
@@ -45,7 +45,6 @@ __global__ void kernel_A(float*__restrict d_i, float*__restrict d_o, int offset)
     d_o[idx] = a+b+c;
 }
 
-
 int main(){
     int numStream = 4, blockSize = 256;             // 流的个数, 每个 block 处理的元素个数
     int numEle = 1024 * 256;                        // 元素的总个数
@@ -53,7 +52,7 @@ int main(){
     int eleBytes = numEle * sizeof(float);          // 元素的总字节数
     int streamBytes = streamSize * sizeof(float);   // 每个流处理的总字节数
 
-    // 分配主机内存和显存
+    // 分配主机内存和显存, 内存分配在主机端才有花样, 全局内存没有什么花样的
     float *h_i, *h_o, *d_i, *d_o;
     checkCudaErrors(cudaMallocHost(&h_i, eleBytes));
     checkCudaErrors(cudaMallocHost(&h_o, eleBytes));

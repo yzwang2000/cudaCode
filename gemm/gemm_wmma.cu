@@ -37,7 +37,7 @@ __global__ void gemm_kernel(half *A, half *B, float *C, int M_PAD, int K_PAD, in
     wmma::fill_fragment(abfrag, 0.0f);
 
     int niter = K_PAD / K_TILE;
-    for (int k = 0; k < niter; ++k) {
+    for (int k = 0; k < niter; ++k){
         wmma::load_matrix_sync(afrag, A + midx * M_TILE * K_PAD + k * K_TILE, K_PAD);
         wmma::load_matrix_sync(bfrag, B + k * K_TILE * N_PAD + nidx * N_TILE, N_PAD);
         wmma::mma_sync(abfrag, afrag, bfrag, abfrag);
@@ -83,7 +83,6 @@ void launch_gemm(const int M, const int K, const int N) {
     cudaEventRecord(start);
     gemm_kernel<<<grid, block>>>(A, B, C, M_PAD, K_PAD, N_PAD);
     cudaEventRecord(stop);
-
     cudaEventSynchronize(stop);
 
     float milliseconds = 0;

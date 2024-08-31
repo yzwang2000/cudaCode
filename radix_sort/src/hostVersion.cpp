@@ -1,6 +1,8 @@
 #include <iostream>
 #include <vector>
 
+using namespace std;
+
 // 基数排序是从最低位看起, 把这一位数字值相同的按照扫描顺序放入同一个桶里面, 值小的桶在前面。
 // 当所有数字都扫描完，再使用高一位，循环上述步骤，直至达到所有数字所有的最高位数，最后输出的就是排序后的答案。
 void radixSort(std::vector<unsigned int>& inputVals, int numBits = 2) {
@@ -49,11 +51,12 @@ std::vector<int> quickSort(vector<int>&nums, int start, int end)
         while (i < j && nums[i] <= base) i++; //从左往右，寻找比base大的数
         swap(nums[i], nums[j]); //找到比base大的数，即与base交换位置
     }
+
     quickSort(nums, start, i - 1);
     quickSort(nums, i + 1, end);
+
     return nums;
 }
-
 
 int main() {
     std::vector<unsigned int> inputVals = {170, 45, 75, 90, 802, 24, 2, 66};

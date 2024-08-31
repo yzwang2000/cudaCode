@@ -38,7 +38,7 @@ __global__ void kernel_flashAttention(float* Q, float* K, float* V, float *O, fl
                 // 依据 qkv_offset 将 Q 全局内存中的数据读取到 Qi 中
             }
 
-            // 取出 m 和 l 每一行最大的值 
+            // 取出 m 和 l 每一行的最大值 
             int m_pre = m[lm_offset+j*tile_size+tid], l_pre = l[lm_offset+j*tile_size+tid];
 
             int m_row = -std::numeric_limits<float>::max();

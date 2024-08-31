@@ -12,7 +12,7 @@
 // 这里使用 union 节省了空间, 而且非常自然的让其公用一个空间 
 unsigned short float32_to_bfloat16(float value){
     union {
-        unsigned short u;
+        unsigned int u;
         float f;
     } tmp;
     tmp.f = value;
@@ -55,12 +55,13 @@ float fp16_to_float32(unsigned short value)
     } tmp;
     
     tmp.u = value;
-    tmp.u = ((tmp.u & 0x8000) << 16) | (((tmp.u & 0x7c00)-(unsigned short)7+(unsigned short)127) << 13) | ((tmp.u & 0x03ff) << 13);
+    tmp.u = ((tmp.u & 0x8000) << 16) | (((tmp.u & 0x7c00)-(unsigned short)15+(unsigned short)127) << 13) | ((tmp.u & 0x03ff) << 13);
     return tmp.f;
 }
 
 // 这个转换过程中要注意一个基础知识点。
-// 对于整数类型来说, 高位转为低位时, 1) 高位截断: 转换过程中, 只保留低位部分, 高位部分会被舍弃 2) 类型解释: 保留的低位部分将按照目标类型的表示方式进行解释。
+// 对于整数类型来说, 高位转为低位时, 1) 高位截断: 转换过程中, 只保留低位部分, 高位部分会被舍弃
+// 2) 类型解释: 保留的低位部分将按照目标类型的表示方式进行解释。
 // int int_val = 0x12345678; // 305419896 in decimal
 // short short_val = static_cast<short>(int_val); // Expected to keep lower 16 bits: 0x5678 (22136 in decimal)
 

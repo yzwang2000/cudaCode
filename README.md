@@ -56,10 +56,10 @@ __global__ void Kernel_A(int *d_s, int *d_o)
 }
 ```
 * 对于代码中的 `1)`, 每个线程都将自己负责的部分首先进行归约到自己的寄存器变量中。尽可能每个块分配比较少的线程, 让一个线程负责多个数据, 不然每次进行一次规约都有很多的线程不干活。
-* 对于代码中的 `2)`, 根据每个块中线程的个数分配共享内存的大小, 让后把每个线程中寄存器的值, 写入到共享内存中。这里的 `__syncthreads()` 是为了同步每个块中的线程, `同一warp中的线程一定是处于同一状态和进度的, 但是不同 warp 的线程所处状态是不确定的, 也就是不同 warp 执行到的地方可能不相同`。读入共享内存中, 是因为 `共享内存能够进行块间数据的共享和同步`(因为我们需要进行块内规约, 需要这一特点)。
+* 对于代码中的 `2)`, 根据每个块中线程的个数分配共享内存的大小, 让后把每个线程中寄存器的值, 写入到共享内存中。这里的 `__syncthreads()` 是为了同步每个块中的线程, `同一warp中的线程一定是处于同一状态和进度的, 但是不同 warp 的线程所处状态是不确定的, 也就是不同 warp 执行到的地方可能不相同`。读入共享内存中, 是因为 `共享内存能够进行块内数据的共享和同步`(因为我们需要进行块内规约, 需要这一特点)。
 * 对于代码中的 `3)`, 这里 `blockDim.x` 一定是能够被 `32` 整除的。这样的写法有很多优势
     * 避免了线程束的分歧, 因为最后一次规约的时候, 步长为 `32`, 所有 `warp` 都是同一状态, 要么执行, 要么不执行。
-    * 避免了共享内存中的 bank 冲突, 以 `warp 0` 为例分析, 当 `s=128` 时, `warp 0` 中的 0 线程访问 0 和 128 元素, 都是位于 0 bank,  1 线程访问 1 和 129 元素, 都是位于 1 bank, ... 31 线程方位 31 和 159 元素, 都位于 31 bank, 不存在冲突。
+    * 避免了共享内存中的 bank 冲突, 以 `warp 0` 为例分析, 当 `s=128` 时, `warp 0` 中的 0 线程访问 0 和 128 元素, 都是位于 0 bank,  1 线程访问 1 和 129 元素, 都是位于 1 bank, ... 31 线程访问 31 和 159 元素, 都位于 31 bank, 不存在冲突。
     * 对于最后一个 warp 内值的规约, 这里并没有在循环中使用, 因为最后一个 `warp` 内的所有线程都是同步的, 对共享内存的访问也是同步的, 不需要同步。
 * 对于代码中的 `4)`, 这里并没有做同步, 因为所有对共享内存的操作都是在一个 warp 内完成的, 减少同步损耗。
 * 规约之后规约的值就位于每个块中共享内存中的第一个值。
@@ -171,6 +171,13 @@ __global__ void Kernel_B(int *d_s, int *d_o)
     - 分离主机代码和 CUDA 代码。nvcc 编译器会将 CUDA 代码(CUDA代码主要是包含 `__global__` 和 `__device__` 等修饰符的代码段)与主机代码分离。
     - 编译和汇编。nvcc 调用C++编译器(g++)对C++代码进行编译, 生成目标文件(.o)。nvcc 将CUDA代码编译成PTX代码或再次使用 ptxas 编译器 将 ptx 编译成二进制的 SASS 代码。
     - 链接阶段。nvcc 会将主机目标文件、CUDA目标文件、CUDA运行时库链接在一起, 最终生成可执行文件。
+![nvcc 编译流程](./fig/nvcc.png)
+* 从图中我们可以看到, 其实首先是利用 `g++` 进行预处理。然后 GPU 端, 是利用 `cicc` 编译 GPU 端的代码生成 `.ptx`, 再使用 `ptxas` 将 ptx 编译成 `.cubin`。最后利用 `fatbinary` 将 ptx 和 cubin 打包成 `fatbin`。然后最后整合到一起再利用 g++ 一起编译。
+* CPU 是基于已经发布的指令集架构, 使得针对同样架构的新的 CPU 不需要修改编译选项即可运行。而 GPU 的架构是不断迭代的, 难以保证二进制的兼容, 所以利用两端编译模型来保证这一点。从cuda到ptx再到cubin。其中PTX可以被视作一种虚拟的GPU架构的组装。他不和实际的硬件直接对应，而是类似CPU的ISA提供了一个通用的指令集，这也是一种虚拟的中间体系结构。而cubin即可认为是运行在硬件上的最终的代码，与GPU的代际强相关。
+* nvcc 通常使用 `computer_xy` 表示 ptx 的架构, 而使用 `sm_xy` 表示 cubin 的架构。
+* ISA(Instruction Set Architecture) 是指令集体系结构。其对上限定了软件的基本功能, 对下制定了硬件实现的功能目标, 因此指令系统的设计(指令集包含那些指令, 指令用什么格式表示) 是计算机系统设计的重要一环。ISA 按照指令系统的复杂程度不同, 可以分为 CISC(Complex Instruction Set Computer) 和 SISC(Reduced Instruction Set Computer)。
+* CISC 追求的是 `强化指令功能, 减少程序的指令条数`, 指令庞大且复杂。SISC 追求的是 `减少指令种类、规范指令格式、简化寻址方式`, 只保留功能简单, 能在一个节拍内完成的指令, 时钟频率通常很高。CISC 主要是 桌面和服务器领域, RISC 主要是 移动和互联网领域。
+* CPU 端运行到 CUDA 程序时, 会使用 `cudaLaunchKernel()` 函数来启动这个 kernel 程序。这个程序要传入 `grid维度`, `block维度`, `shareMemoryBytes`, `stream`。调用完 `cudaLaunchKernel` 之后, (接下来的叙述就是 kernel 的 launch 开销)会把 kernel函数及其参数发送到设备上, 并启动GPU上的执行单元来执行这个函数。
 
 ## 向量化内存访问 [原文](https://zhuanlan.zhihu.com/p/572817996)
 * 硬件的 FLOPS 与带宽比例不断增加, 使得很多 CUDA 内核都是受带宽限制的。使用向量化访存可以减少访存指令, 指令 cache 里能够存下更多指令, 提高指令 cache 的命中率, 提高带宽利用率。
@@ -768,7 +775,7 @@ std::cout << "multiple stream letancy: " << letancy << " ms" << std::endl;
     - `load_matrix_sync`：等待warp中所有线程都到达 `load_matrix_sync` 时候，从内存中加载矩阵片段。其中 Layout 是从 fragment 中推断出来的。
 
 ## flash-attention 优化
-* flash-attention 是从优化访存的角度优化 attention 计算，而且其在推理和训练上都是有效的。主要的技巧有这几个(Tiling 和 Recomputation)：将多个 operation 融合成一个 operation; 推理过程中不将中间结果(Q*KT 和 softmax 的结果)存储到 HBM 中，只将运算结果 output 存回 HBM 中; 在反向传播时候，重新计算 S(Q*KT) 和 P(Softmax) 反而是可以更快(因为Q, K, V 本身就需要加载到 SRAM 中, 直接计算，比访存 HBM 更快)。
+* flash-attention 是从优化访存的角度优化 attention 计算，而且其在推理和训练上都是有效的。主要的技巧有这两个(Tiling 和 Recomputation)：将多个 operation 融合成一个 operation; 推理过程中不将中间结果(Q*KT 和 softmax 的结果)存储到 HBM 中，只将运算结果 output 存回 HBM 中; 在反向传播时候，重新计算 S(Q*KT) 和 P(Softmax) 反而是可以更快(因为Q, K, V 本身就需要加载到 SRAM 中, 直接计算，比访存 HBM 更快)。
 * flash-attentionV2 相比于 V1 有如下改进：
     - 减少了非矩阵乘法的计算，可以利用 TensorCore
     - 调整了内外循环，Q 为外层循环，KV为内存循环。通过此种做法减少在 shared memory 上的读写次数。
@@ -1046,11 +1053,11 @@ cudaError_t cudaHostGetDevicePointer(void ** pDevice,void * pHost,unsigned flags
 * 统一虚拟寻址(UVA)的内存机制, 即设备端和主机端共享同一个地址空间。这样的话cudaHostAlloc函数分配的固定主机内存具有相同的主机和设备地址，可以直接将返回的地址传递给核函数。那么cudaHostGetDevicePointer这个函数基本没啥用了。
 
 ## DMA 介绍
-* DMA (Direct Memory Access) 即直接存储访问, 借助内部的控制器来实现内存和外设之间的数据传输。有了 DMA, CPU 可以专注于内存数据的存取, 外设数据的搬运过程久交给 DMA 硬件完成。
+* DMA (Direct Memory Access) 即直接存储访问, 借助内部的控制器来实现内存和外设之间的数据传输。有了 DMA, CPU 可以专注于内存数据的存取, 外设数据的搬运过程就交给 DMA 硬件完成。
 * DMA 的优势有那些:
     - 降低 CPU 的使用率。 不需要 CPU 的干预就可以服务于外设, 这样 CPU 就可以去处理别的事物, 提高系统效率。
     - 提高设备的吞吐能力。DMA 有块传输和单字传输很多种传输方式, 而CPU通过总线传输，一个时钟周期最多存取一次总线，所以使用DMA能使设备的吞吐能力大为增强。
-* 其实为什么异步拷贝的时候，需要分配页锁定内存。就是因为只有页锁定内存才能使用 DMA 来进行内存和device的异步传输（不阻塞CPU）。
+* 其实为什么异步拷贝的时候，需要分配页锁定内存。就是因为只有页锁定内存才能使用 DMA 来进行内存和 device 的异步传输（不阻塞CPU）。
 
 ## CUDA Graph
 * CUDA 中启动 kernel 的时候会有一定的开销, 这种开销主要来自以下几个方面:
@@ -1073,7 +1080,7 @@ cudaError_t cudaHostGetDevicePointer(void ** pDevice,void * pHost,unsigned flags
     - 最后通过调用 `cudaGraphLaunch` 将 graphExec 加入到指定的流中。
 
 ## Byte Transformer [原文](https://zhuanlan.zhihu.com/p/656342974)
-* Byte Transformer 是针对自然语言处理常见的可变长输入, 论文提出了一套优化算法, 在保证正确性的前提下, 成功避免了传统实现中的冗余计算。其实 Transformer 更适合于处理 BERT 这种 encoder-decoder 的大语言模型。
+* Byte Transformer 是针对自然语言处理常见的可变长输入, 论文提出了一套优化算法, 在保证正确性的前提下, 成功避免了传统实现中的冗余计算。其实 ByteTransformer 更适合于处理 BERT 这种 encoder-only 的大语言模型。
 * Byte Transformer 的创新之处主要在于以下几点:
     - padding-free 的方法, 将变长的输入张量打包, 并计算 bach_seq_offset 和 wordIdx, 避免填充和 padding token 的计算。
     - 融合 MHA(Multi-Head Attention), 减少 MHA 中间矩阵的内存开销, 也利用 WMMA 使用 TensorCore 进行加速。
@@ -1085,3 +1092,17 @@ cudaError_t cudaHostGetDevicePointer(void ** pDevice,void * pHost,unsigned flags
 ## PagedAttention
 * 文中对 KV Cache 利用 PagedAttention 进行了显存的管理。主要是 CacheManager 类维护了 `block_table`, 数据类型是 `std::unordered_map<int64_t, std::vector<std::pair<int64_t, int64_t>>> block_table`。其中 key 是 batch(相当于每个batch 都有一个自己的映射表), value 是占用的内存块的序号数 和 使用的这个块的大小。还有一个数据成员是 `free_blocks`, 数据类型是 `std::set<int64_t>`, 存放的是空闲 block 的索引。
 * 维护了几个成员函数, 核心的成员函数是 `update`, 根据当前 next_token 的状态来判断是否还要继续增加新的 token 的 kv Cache。其中涉及到了某个 batch 生成结束, free 整个 batch 的显存。还有得到新的空闲的 block 索引(依据 free_blocks 来得到, 取出第一个, 并将其中元素删除掉)。
+
+## Im2Col+gemm 卷积计算方法
+![卷积的 Im2Col 计算方法](./fig/im2col.jpg)
+* 利用 im2col + gemm 实现卷积计算的优点:
+    - 可以利用高度优化的矩阵乘法库。将卷积操作转换成了矩阵乘法的操作, 可以利用高度优化的线性代数库, 如 cublas， OpenBlas, 大大提高效率。
+    - 更好利用缓存。卷积计算过程设计大量内存访问操作, `im2col` 将对应的感受野区域展平, 更好的利用缓存, 提高数据局部性, 减少内存访问延迟。
+    - 方便移植, 矩阵乘法是比较通用的方法, 可以额方便地移动到不同的平台上, 只需要替换底层的 GEMM 实现即可。
+* 利用 im2col + gemm 实现卷积计算的缺点:
+    - 内存消耗大。将数据展开为一个更大的矩阵, 显著增加内存使用。
+    - `im2col` 本身也是一个访存密集型的操作, 也是有比较大的访存开销。
+
+## Winograd 卷积计算方法
+* Winograd 的核心思想就是 `通过增加加法操作来减少乘法操作` 从而实现计算加速。
+* 
