@@ -58,6 +58,7 @@ __global__ void gemm(float* __restrict__ A, float* __restrict__ B, float* __rest
             }
         }
     }
+
     // accum 的结果直接写入全局内存中
 }
 

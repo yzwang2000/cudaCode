@@ -84,7 +84,6 @@ __global__ void im2col_h(const int n, const float *data_im, const int height,
     }
 }
 
-
 // 实现 im2col 的卷积运算
 // 其中 data_im 是原始 im 矩阵, data_col 是中间的 col 矩阵, channels 是 C_in
 void im2col(const float *data_im, const int batch_size, const int channels,

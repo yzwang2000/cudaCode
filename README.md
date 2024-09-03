@@ -175,7 +175,7 @@ __global__ void Kernel_B(int *d_s, int *d_o)
 * 从图中我们可以看到, 其实首先是利用 `g++` 进行预处理。然后 GPU 端, 是利用 `cicc` 编译 GPU 端的代码生成 `.ptx`, 再使用 `ptxas` 将 ptx 编译成 `.cubin`。最后利用 `fatbinary` 将 ptx 和 cubin 打包成 `fatbin`。然后最后整合到一起再利用 g++ 一起编译。
 * CPU 是基于已经发布的指令集架构, 使得针对同样架构的新的 CPU 不需要修改编译选项即可运行。而 GPU 的架构是不断迭代的, 难以保证二进制的兼容, 所以利用两端编译模型来保证这一点。从cuda到ptx再到cubin。其中PTX可以被视作一种虚拟的GPU架构的组装。他不和实际的硬件直接对应，而是类似CPU的ISA提供了一个通用的指令集，这也是一种虚拟的中间体系结构。而cubin即可认为是运行在硬件上的最终的代码，与GPU的代际强相关。
 * nvcc 通常使用 `computer_xy` 表示 ptx 的架构, 而使用 `sm_xy` 表示 cubin 的架构。
-* ISA(Instruction Set Architecture) 是指令集体系结构。其对上限定了软件的基本功能, 对下制定了硬件实现的功能目标, 因此指令系统的设计(指令集包含那些指令, 指令用什么格式表示) 是计算机系统设计的重要一环。ISA 按照指令系统的复杂程度不同, 可以分为 CISC(Complex Instruction Set Computer) 和 SISC(Reduced Instruction Set Computer)。
+* ISA(Instruction Set Architecture) 是指令集体系结构。其对上限定了软件的基本功能, 对下制定了硬件实现的功能目标, 因此指令系统的设计(指令集包含那些指令, 指令用什么格式表示) 是计算机系统设计的重要一环。ISA 按照指令系统的复杂程度不同, 可以分为 CISC(Complex Instruction Set Computer) 和 RISC(Reduced Instruction Set Computer)。
 * CISC 追求的是 `强化指令功能, 减少程序的指令条数`, 指令庞大且复杂。SISC 追求的是 `减少指令种类、规范指令格式、简化寻址方式`, 只保留功能简单, 能在一个节拍内完成的指令, 时钟频率通常很高。CISC 主要是 桌面和服务器领域, RISC 主要是 移动和互联网领域。
 * CPU 端运行到 CUDA 程序时, 会使用 `cudaLaunchKernel()` 函数来启动这个 kernel 程序。这个程序要传入 `grid维度`, `block维度`, `shareMemoryBytes`, `stream`。调用完 `cudaLaunchKernel` 之后, (接下来的叙述就是 kernel 的 launch 开销)会把 kernel函数及其参数发送到设备上, 并启动GPU上的执行单元来执行这个函数。
 
@@ -1093,16 +1093,122 @@ cudaError_t cudaHostGetDevicePointer(void ** pDevice,void * pHost,unsigned flags
 * 文中对 KV Cache 利用 PagedAttention 进行了显存的管理。主要是 CacheManager 类维护了 `block_table`, 数据类型是 `std::unordered_map<int64_t, std::vector<std::pair<int64_t, int64_t>>> block_table`。其中 key 是 batch(相当于每个batch 都有一个自己的映射表), value 是占用的内存块的序号数 和 使用的这个块的大小。还有一个数据成员是 `free_blocks`, 数据类型是 `std::set<int64_t>`, 存放的是空闲 block 的索引。
 * 维护了几个成员函数, 核心的成员函数是 `update`, 根据当前 next_token 的状态来判断是否还要继续增加新的 token 的 kv Cache。其中涉及到了某个 batch 生成结束, free 整个 batch 的显存。还有得到新的空闲的 block 索引(依据 free_blocks 来得到, 取出第一个, 并将其中元素删除掉)。
 
-## Im2Col+gemm 卷积计算方法
+## Im2Col+gemm 卷积计算方法 [原文](https://zhuanlan.zhihu.com/p/687598264)
 ![卷积的 Im2Col 计算方法](./fig/im2col.jpg)
 * 利用 im2col + gemm 实现卷积计算的优点:
-    - 可以利用高度优化的矩阵乘法库。将卷积操作转换成了矩阵乘法的操作, 可以利用高度优化的线性代数库, 如 cublas， OpenBlas, 大大提高效率。
-    - 更好利用缓存。卷积计算过程设计大量内存访问操作, `im2col` 将对应的感受野区域展平, 更好的利用缓存, 提高数据局部性, 减少内存访问延迟。
+    - 可以利用高度优化的矩阵乘法库。将卷积操作转换成了矩阵乘法的操作, 可以利用高度优化的线性代数库, 如 cublas, OpenBlas, 大大提高效率。
+    - 更好利用缓存。卷积计算过程涉及大量内存访问操作, `im2col` 将对应的感受野区域展平, 更好的利用缓存, 提高数据局部性, 减少内存访问延迟。
     - 方便移植, 矩阵乘法是比较通用的方法, 可以额方便地移动到不同的平台上, 只需要替换底层的 GEMM 实现即可。
 * 利用 im2col + gemm 实现卷积计算的缺点:
     - 内存消耗大。将数据展开为一个更大的矩阵, 显著增加内存使用。
     - `im2col` 本身也是一个访存密集型的操作, 也是有比较大的访存开销。
 
-## Winograd 卷积计算方法
-* Winograd 的核心思想就是 `通过增加加法操作来减少乘法操作` 从而实现计算加速。
-* 
+## Winograd 卷积计算方法 [原文](https://zhuanlan.zhihu.com/p/524344248)
+* Winograd 的核心思想是将卷积操作分解成一系列小矩阵的乘法, 通过矩阵变换和逆变换, 将卷积操作优化为`更少的乘法和更多的加法`操作。
+* Winograd 将卷积操作分解为 3 个步骤, 输入变换、权重变换、输出变换。
+    - 输入变换: 使用预定义的变换矩阵 B, 将输入特征图的块 d 进行变换，得到变换后的输入矩阵 `V`。其实这个变换是将输入数据转换到另一个空间中。$V=B^T \cdot d \cdot B$。
+    - 权重变换: 对卷积核 g 进行类似的变化。使用另一个预定义的变换矩阵 `G` 对卷积核进行变换, 得到变换后的卷积核为 `U`。$U=G\cdot g \cdot G^T$。
+    - 变换后的输入块 U 和卷积核块 V, 在 Winograd 域中进行逐元素的相乘得到 `M`。$M=V \cdot U$。
+    - 输出变换, 在用一个预定义矩阵 A进行逆变换, 回到原来的空间, 得到最终的卷积输出 `Y`。$Y=A^T \cdot M \cdot A$。
+    - 对所有小块的结果进行合并, 得到最终的卷积输出特征图。
+    - 整个过程的公式为 $Y=A^T[(GgG^T)\odot (B^TdB)]A = A^T[U\odot V]A$。
+* 要是单纯的套这个公式, 其实计算复杂度是增加的。但是 A, B, G, g 都是已知的, 只有 d 是每次不一样的。所以 `GgG^T` 可以提前计算出来, d 虽然不知道其元素是什么, 但是可以把其公式代入进去, 避免了乘法的操作(因为 B 中的元素是由 0, 1, -1 组成的)。
+* Winograd 的卷积算法的形式通常表示为 `F(m*m, n*n)`, 其中 `m` 是输出块的大小(如2*2), `n` 是卷积核的大小(如 3*3)。对于任意卷积核大小为 `n*n`, 变换矩阵 `B`, `G`, `A` 是基于多项式插值的方法生成的。变换矩阵的内容可以通过特定的数学公式推导得到, 并且随着 `m` 和 `n` 的变化而不同。
+* 优点:
+    - 减少乘法次数, 提高计算效率。通过变换输入和权重, 将原本复杂的卷积计算转化为更少的矩阵乘法和更多的加法。
+    - 适用于小卷积核, 在小卷积核 `3*3` 和 `5*5` 上的计算最为高效, 适合常见的 CNN 模型（例如 ResNet、VGG 等）中广泛使用的小尺寸卷积核。
+* 缺点:
+    - 有精度误差, 可能会影响模型性能。Winograd 中涉及到多个加法和减法操作, 这些操作容易累计数值误差, 尤其是在低精度的情况下。
+    - 不适合于过大的卷积核。虽然可以扩展到不同大小的卷积核, 但是对于大尺寸的卷积核, 变换矩阵的计算复杂性增加, 导致计算的收益变小, 需要更多的内存。
+
+## Cooperative Groups (协作组)
+* 协作组是一种编程模型, 用于更灵活地组织线程并协调线程之间的合作, 帮助开发者更高效地实现多线程的同步与协作, 优化 GPU 性能。其主要功能如下:
+    - 灵活的线程分组。Cooperative Groups 允许开发者在任意层次上的一线程组(thread group), 可以创建 warp 级别, block 级别, grid 级别的线程组。从而实现更大范围内线程的同步, 而不再局限于传统的 __syncthreads() 只在一个 block 内同步。
+    - 提高代码的适用性, 提高兼容性。显示分组将函数的需求显示化, 减少误用函数的机会。
+* Cooperative Groups 是一个 API，用于定义和同步 CUDA 程序中的线程组，可以在任何与 CUDA 9 兼容的支持 CUDA 的 GPU 上工作。意味着 Kepler 和更高版本的 GPU (计算能力 3.0+)。
+```C++
+// 1.
+// Cooperative Groups 中的基本数据类型是 thread_group, 是一组线程的函数句柄。该函数句柄只能由它组内的线程成员访问。
+// unsigned size();  // 获取线程组中线程的个数
+// thread_rank();    // 组中查找调用线程的索引 (介于 0 到 size()-1)
+// 线程组提供了在组中所有线程之间执行集体操作的能力(分成线程组的意义), 集体操作是指需要在一组指定的线程之间进行同步或者通信的操作, 最简单的集体操作就是一个屏障, 不传输任何数据, 只是同步线程组中的线程。
+// 第一个集体操作调用 cooperative_groups::sync() 来同步线程组, 此时组内的所有线程都会进行一个同步。g.sync(); cg::syncthronize(g);
+
+using namespace cooperative_groups;
+using cooperative_groups::thread_group;
+
+// 开发者可以自由指定多少个线程为一组进行规约求和, 如果线程组的大小为 warpSize, 则等价于 warpReduceSum。如果线程组的大小为 block size, 就等价于 blockReduceSum
+__device__ int reduce_sum(thread_group g, int *temp, int val)
+{
+    int lane = g.thread_rank();  // 得到线程组中线程的索引序号
+
+    // i 的初始值为线程组中线程的个数, val 对每个线程私有
+    for (int i = g.size() / 2; i > 0; i /= 2)
+    {
+        // 这种思路是利用 shared_memory 做一个线程间信息交换的介质
+        temp[lane] = val;
+        g.sync();  // wait for all threads to store
+        if(lane<i) val += temp[lane + i];
+        g.sync();  // wait for all threads to load
+    }
+    return val;  // note: only thread 0 will return full sum
+}
+
+// 2.
+// thread blocks。Cooperative Groups 引入了新的数据类型 thread_block, thread_block block = this_thread_block(); 每个线程都会得到线程块的实列。
+// 其实线程块组的意思是一个 block 中的所有线程分成一个组。
+// __syncthreads();  block.sync();  cg::synchronize(block);  都是同一个意思
+
+// 3.
+// Partitioning Groups。Cooperative Groups 为开发者提供了通过划分现有组来创建新组的方法。cg::tiled_partition() 就负责将一个线程块组划分成多个组。
+// thread_group tile32 = cg::partition(this_block_thread(), 32);  // 每个线程都将获得一个 32 线程组的函数句柄。
+
+// 4.
+// Cooperative Groups 的真正用途在于模块化, 将组做为显示参数传递给函数, 利用模块化统一接口。有效的减少了竞争和死锁的情况。
+// 每个 block 中只有一部分的线程会调用 sum() 函数, 并非块中的所有线程都会达到 __syncthreads(), 因此存在死锁情况。
+__device__ int sum(int *x, int n) 
+{
+    ...
+    __syncthreads();
+    ...
+    return total;
+}
+
+__global__ void parallel_kernel(float *x, int n)
+{
+    if (threadIdx.x < blockDim.x / 2)
+        sum(x, count);  // error: half of threads in block skip
+                        // __syncthreads() => deadlock
+}
+
+// 使用协作组之后
+__device__ int sum(thread_block block, int *x, int n) 
+{
+    ...
+    block.sync();
+    ...
+    return total;
+}
+
+__global__ void parallel_kernel(float *x, int n)
+{
+    sum(this_thread_block(), x, count); // no divergence around call
+}
+
+// 5.
+// Cooperative Groups 提供了 cg::tiled_partition() 的一个替代版本，它将分组大小作为模板参数，返回一个静态大小的组，称为 thread_block_tile. 在编译时了解分组大小可以提供更好的优化机会。
+thread_block_tile<32> tile32 = tiled_partition<32>(this_thread_block());
+thread_block_tile<4>  tile4  = tiled_partition<4> (this_thread_block());
+
+// thread Block Tiles 也提供了一些 warp-level 原语操作。
+// .shfl()  .shfl_down()  .shfl_up()  .shfl_xor()
+
+```
+## Atomic Functions (原子操作) [https://zhuanlan.zhihu.com/p/578195193]
+* 原子操作对驻留在`全局内存或共享内存`中的一个 32 位或者 64 位单词执行 `读-修改-写原子操作`。例如, `atomicAdd()` 在全局或共享内存中的某个地址读取一个单词，向其中添加一个数字，然后将结果写回相同的地址。原子函数只能在`设备函数`中使用。
+* 原子操作有 算数运算函数 和 按位操作函数。
+    - 算数运算函数: `atomicAdd()`, `atomicSub()`, `atomicMin()`, `atomicMax()`
+    - 按位操作函数: `atomicAnd()`, `atomicOr()`, `atomicXor()`
+    - 交换函数: `atomicExch()`, `atomicCAS()`
+* 其中的 `atomicExch(int* address, int val)` 是从第一个参数 address 指针指向的内存地址(可以是全局内存或共享内存)中读取32位或64位数据(记做旧值 old), 然后将 val 值写入到 address 地址处, 并返回未做交换前的旧值 old。这三个操作仍然在一个原子事务中执行。
+* 其中的 `atomicCAS(int* address, int compare, int val)` 是从第一个参数 address 指针指向的内存地址(可以是全局内存或共享内存)中读取32位或64位数据(记做旧值 old), 比较 old 值是否与 compare 相等, 相等的话, 将 val 写入到 address 地址处, 不相等的话, 就不改变 address 处的值。任何原子操作都可以基于 automicCAS() 实现。
