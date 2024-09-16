@@ -10,9 +10,10 @@
     先计算卷积后输出特征图的大小 height_out = (height+2*padding_h-kernel_h)/stride_h + 1; 
     width_out = (width+2*padding_w-kernel_w)/stride_w + 1;
 
-    整体的运算过程其实就是比较简单的思路, 
+    整体的运算过程其实就是比较简单的思路
     1) 将 im矩阵先转换成 col矩阵, [bs, C_in, height, width] -> [bs, C_in*kernel_h*kernel_w, height_out*width_out]
-    2) 展平 filter [C_out, C_in, kernel_h, kernel_w] -> [C_out, C_in*kernel_h*kernel_w] 其实这步展平操作, 只需要改变 shape 就可以了, 并不需要改变元素的排列顺序
+    2) 展平 filter [C_out, C_in, kernel_h, kernel_w] -> [C_out, C_in*kernel_h*kernel_w] 其实这步展平操作, 
+    只需要改变 shape 就可以了, 并不需要改变元素的排列顺序
     3) 将 filter 矩阵乘 col矩阵得到 ouput [C_out, height_out*width_out]
 
     在 CUDA 实现的时候, 线程组织分配的方式为 每个 thread 处理一个 kernel_h*kernel_w(一个通道的 col 中的一列), 一个 block 分配 256 个线程。

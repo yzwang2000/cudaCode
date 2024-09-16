@@ -16,7 +16,6 @@ namespace
         const float scoreThreshold, const uint netWidth, const uint netHeight, const uint gridSizeX, const uint gridSizeY,
         const uint numOutputClasses, const uint numBBoxes, const float scaleXY, const float *anchors)
     {
-
         // x, y, z 方向的坐标
         uint x_id = threadIdx.x + blockDim.x * blockIdx.x;
         uint y_id = threadIdx.y + blockDim.y * blockIdx.y;

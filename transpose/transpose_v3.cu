@@ -4,7 +4,7 @@
 #define TILE_DIM 32
 #define BLOCK_SIZE 32
 #define M 1000  // 输入矩阵的行
-#define N 800  // 输入矩阵的列
+#define N 800   // 输入矩阵的列
 
 // 普通的转置方法, 这里是每个线程对应一个数据。线程块的大小为 32*32, 处理的数据块的大小也为 32*32
 // 其实这里是两个层面, block 层面的 bidx 和 bidy 是可以直接交换的。而 thread 层面的 x 和 y, 要看共享内存中的索引顺序。
@@ -37,7 +37,7 @@ __global__ void transpose(int* A, int* B)
 __managed__ int input_M[M*N];
 int cpu_result[M*N];
 
-// in-place matrix transpose, 其实只有一般的线程再干活(严谨来说是多一半)
+// in-place matrix transpose, 其实只有一半的线程再干活(严谨来说是多一半)
 __global__ void ip_transpose(int* data)
 {
     __shared__ int tile_s[TILE_DIM][TILE_DIM+1];  // 存储原始的

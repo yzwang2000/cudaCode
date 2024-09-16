@@ -94,7 +94,7 @@ T blockReduceSum(T val)
   __syncthreads();
 
   val = (threadIdx.x < (blockDim.x >> 5 )) ? shared[lane] : (T)0.0f;
-  val = warpReduceSum(val);
+  val = warpReduceSum<T>(val);
 
   return val;  // 返回是都要返回的, 只不过只有部分线程的值为想要的值
 }
@@ -176,7 +176,12 @@ __global__ void Kernel_B(int *d_s, int *d_o)
 * CPU 是基于已经发布的指令集架构, 使得针对同样架构的新的 CPU 不需要修改编译选项即可运行。而 GPU 的架构是不断迭代的, 难以保证二进制的兼容, 所以利用两端编译模型来保证这一点。从cuda到ptx再到cubin。其中PTX可以被视作一种虚拟的GPU架构的组装。他不和实际的硬件直接对应，而是类似CPU的ISA提供了一个通用的指令集，这也是一种虚拟的中间体系结构。而cubin即可认为是运行在硬件上的最终的代码，与GPU的代际强相关。
 * nvcc 通常使用 `computer_xy` 表示 ptx 的架构, 而使用 `sm_xy` 表示 cubin 的架构。
 * ISA(Instruction Set Architecture) 是指令集体系结构。其对上限定了软件的基本功能, 对下制定了硬件实现的功能目标, 因此指令系统的设计(指令集包含那些指令, 指令用什么格式表示) 是计算机系统设计的重要一环。ISA 按照指令系统的复杂程度不同, 可以分为 CISC(Complex Instruction Set Computer) 和 RISC(Reduced Instruction Set Computer)。
-* CISC 追求的是 `强化指令功能, 减少程序的指令条数`, 指令庞大且复杂。SISC 追求的是 `减少指令种类、规范指令格式、简化寻址方式`, 只保留功能简单, 能在一个节拍内完成的指令, 时钟频率通常很高。CISC 主要是 桌面和服务器领域, RISC 主要是 移动和互联网领域。
+* CISC 追求的是 `强化指令功能, 减少程序的指令条数`, 指令庞大且复杂。SISC 追求的是 `减少指令种类、规范指令格式、简化寻址方式`, 只保留功能简单, 能在一个节拍内完成的指令, 时钟频率通常很高。CISC 主要是 桌面和服务器领域, RISC 主要是 移动和互联网领域。CISC 和 RISC 的区别通常如下:
+    - 指令集的复杂程度: CISC 指令集复杂, 每条指令可以完成很多的操作, 旨在减少指令数量。RISC 指令集简单, 只有少量基础指令, 每条指令通常只是执行一个简单的操作。处理器完成指令更高效。
+    - 指令长度: CISC 指令长度通常不固定, 解码复杂。RISC指令长度固定, 使得解码变得简单和快速。
+    - 执行时间: CISC 由于指令复杂, 许多指令可以需要多个时钟周期来完成。RISC 指令简单, 设计上要求大部分指令在一个时钟周期内完成，从而提高执行效率。
+    - 内存使用: CISC 每条指令执行的操作比较多，因此程序所需的指令数量相对较少，占用的内存较少。RISC 指令执行的操作比较少，所以程序通常需要更多的指令来完成同样的任务，导致需要更多的内存空间。
+
 * CPU 端运行到 CUDA 程序时, 会使用 `cudaLaunchKernel()` 函数来启动这个 kernel 程序。这个程序要传入 `grid维度`, `block维度`, `shareMemoryBytes`, `stream`。调用完 `cudaLaunchKernel` 之后, (接下来的叙述就是 kernel 的 launch 开销)会把 kernel函数及其参数发送到设备上, 并启动GPU上的执行单元来执行这个函数。
 
 ## 向量化内存访问 [原文](https://zhuanlan.zhihu.com/p/572817996)
@@ -653,7 +658,7 @@ __global__ void kernel_scalarProduct(half2 *vec1, half2 *vec2, float* result, in
 }
 ```
 ## 检查函数的使用
-* 检查 cuda 错误的函数主要分为两种。一种是同步的函数, 一种是异步的函数。同步的函数的话, 直接用用宏接收到这个函数的 cudaSuccess 类型变量的返回值即可。异步函数的话, 无任何返回值。所以要用 `cudaGetLastError()` 来检测一次函数的是否运行成功。当然 `cudaGetLastError()` 也能用来检测同步函数。但是这个函数运行前必须调用 `cudaDeviceSynchronize()` 来同步主机和设备。
+* 检查 cuda 错误的函数主要分为两种。一种是同步的函数, 一种是异步的函数。同步的函数的话, 直接用宏接收到这个函数的 cudaSuccess 类型变量的返回值即可。异步函数的话, 无任何返回值。所以要用 `cudaGetLastError()` 来检测一次函数的是否运行成功。当然 `cudaGetLastError()` 也能用来检测同步函数。但是这个函数运行前必须调用 `cudaDeviceSynchronize()` 来同步主机和设备。
 
 ```C++
 // host 端调用, 依据传入的 cudaError_t 类型的变量来打印错误所在位置和错误信息
@@ -973,9 +978,101 @@ std::vector<unsigned int> quickSort(std::vector<unsigned int>&nums, int start, i
 }
 ```
 
+## 堆排序
+* 堆排序(Heap Sort) 是一种基于堆数据结果的比较排序算法, 具有比较好的时间复杂度和空间复杂度。堆是一种完全二叉树(在完全二叉树中，除了最底层节点可能没填满外，其余每层节点数都达到最大值，并且最下面一层的节点都集中在该层最左边的若干位置)。
+* 堆排序的基本思路:
+    - 建立堆(分为最大堆和最小堆)。首先将无序数组调整为最大堆, 时间复杂度 `O(n)`。
+    - 交换堆顶与堆尾元素。将最大值与数组的最后一个元素交换位置, 将剩余元素调整为新的最大堆。`O(nlog(n))`
+* 数组存放堆的数据的注意点: a. 对于数组中下标为 i 的元素, 其父亲节点下标 parent(i) = (i-1)/2, 其左孩子下标 left(i)=2*i+1, 其右孩子下标 right(i)=2*i+2;  b. 堆中元素个数为 heapSize, 那么最后一个非叶子节点的索引为 `heapSize/2-1`。
+* 在堆中插入元素后，为了维持堆的性质（最小堆或最大堆），需要进行“上浮”操作，即通过调整插入元素的位置使得堆仍然符合要求(整个的时间复杂度为`O(log(n))`):
+    - 将元素插入堆的最后一个位置：通常堆是用数组来表示的，插入元素时，先将元素添加到数组的末尾, heapsize=heapsize+1。
+    - 上浮调整: 与父节点比较, 如果插入的元素比父节点大(最大堆, 最小堆是插入的元素小于其父节点), 则进行交换, 重复此过程直到不需要交换或者到达根节点为止。
+* 堆中删除元素(删除的是根节点的元素), 然后通过“下沉”操作来调整堆的结构，使其保持堆的性质。具体的步骤如下(时间复杂度为 `O(log(n))`)：
+    - 删除堆顶的元素, 将堆顶元素与堆尾元素进行交换, heapsize=heapsize-1。
+    - 下沉调整: 将堆顶元素与它的子节点进行比较, 对于最大堆，如果堆顶元素比任一子节点小，交换它和较大的子节点; 重复此过程, 直到堆元素的值都比其子元素大或者达到叶子节点。
+```C++
+#include <iostream>
+#include <vector>
+
+// 建立大根堆, 升序排序
+// 将下标为 k 的节点进行下沉
+// 整体思路是 k 必须为非叶子节点。
+// 然后判断其值是否大于等于其左右子节点的最大值, 不大于等于的话就进行进行下沉操作, 直至 k 为叶子节点, 或者 k 的值大于其左右子节点的最大值
+void HeapAdjust(std::vector<int>& nums, int heapSize, int k){
+	while(k<heapSize/2)  // 最后一个非叶子节点索引为 heapSize/2-1
+	{
+		int largest = 2*k+1;  // 因为 k 不是叶子节点, 所以其左节点一定存在
+		int right = 2*k+2;
+		if(right<heapSize && nums[largest]<nums[right]) largest = right;
+		if(nums[k] > nums[largest]) break;  // 这里应该是 break, 而不是 continue;
+		std::swap(nums[k], nums[largest]);
+		k = largest;
+	}
+}
+
+// 建立小根堆, 降序排序
+/*
+void HeapAdjust(std::vector<int>& nums, int heapSize, int k){
+	while(k<heapSize/2)  // 最后一个非叶子节点索引为 heapSize/2-1
+	{
+		int small = 2*k+1;  // 因为 k 不是叶子节点, 所以其左节点一定存在
+		int right = 2*k+2;
+		if(right<heapSize && nums[small]>nums[right]) small = right;
+		if(nums[k] < nums[small]) break;  // 这里应该是 break, 而不是 continue;
+		std::swap(nums[k], nums[small]);
+		k = small;
+	}
+}
+*/
+
+void HeapSort(std::vector<int>& nums)
+{
+	int heapSize = nums.size();       // 最初的堆的大小
+	// 建立堆。从最后一个非叶子节点开始, 依次将所有的非叶子节点进行下沉操作。
+	// 建立堆需要将无序数组构建成一个堆, 时间复杂度为 O(n)。而每个节点下沉操作最多需要 O(log(n))。建堆时间复杂度为 O(n)
+	for(int i=heapSize/2-1; i>=0; --i)
+	{
+		HeapAdjust(nums, heapSize, i);
+	}
+
+	// 堆排序。从最后一个元素开始, 每次将最后一个元素与第一元素进行交换, 然后调整第一个元素, 注意此时的 heapSize 已经减少了 1。
+	// 需要执行 n-1 次, 每次调整是时间复杂度为 O(log(n)), 这部分时间复杂度为 O(nlog(n))。
+	for(int i=heapSize-1; i>0; --i)
+	{
+		std::swap(nums[0], nums[i]);  // 将堆中最后一个元素与第一个元素进行交换
+		HeapAdjust(nums, i, 0);       // 对堆中的第一个元素进行调整
+	}
+	// 由于堆排序的是一种原地排序算法, 不需要额外的存储空间, 空间复杂度为 O(1)。
+}
+
+int main()
+{
+	std::vector<int> arr {9, 5, 6, 3, 5, 3, 1, 0, 96, 66};
+	std::cout << "排序前的结果为: " << std::endl;
+	for(int i=0; i<arr.size(); ++i)
+	{
+		std::cout << arr[i] << " ";
+	}
+	std::cout << std::endl;
+
+	HeapSort(arr);
+
+	std::cout << "排序后的结果为: " << std::endl;
+	for(int i=0; i<arr.size(); ++i)
+	{
+		std::cout << arr[i] << " ";
+	}
+	std::cout << std::endl;
+
+	return 0;
+}
+// 
+```
+
+
 ## YOLOv5 推理优化
 * 预处理部分: yolov5 中的预处理主要由以下三个部分组成:  [B, srcH, srcW, srcC] -> [B, tarC, tarH, tarW]
-    - Scale: 直接 Resize 和 LetterBox(保持原图比例, 将图片放到一个正方形的画布中, 多余部分用黑色填充。)
+    - Scale: 直接 Resize 和 LetterBox(保持原图比例, 将图片放到一个正方形的画布中, 多余部分用黑色填充)
     - Normalization: 归一化, 将像素值(unsigned char)缩放到 [0, 1] 间。
     - BGR2RGB: 颜色通道顺序调整。
     - BHWC->BCHW: 改变特征通道顺序。
@@ -1212,3 +1309,341 @@ thread_block_tile<4>  tile4  = tiled_partition<4> (this_thread_block());
     - 交换函数: `atomicExch()`, `atomicCAS()`
 * 其中的 `atomicExch(int* address, int val)` 是从第一个参数 address 指针指向的内存地址(可以是全局内存或共享内存)中读取32位或64位数据(记做旧值 old), 然后将 val 值写入到 address 地址处, 并返回未做交换前的旧值 old。这三个操作仍然在一个原子事务中执行。
 * 其中的 `atomicCAS(int* address, int compare, int val)` 是从第一个参数 address 指针指向的内存地址(可以是全局内存或共享内存)中读取32位或64位数据(记做旧值 old), 比较 old 值是否与 compare 相等, 相等的话, 将 val 写入到 address 地址处, 不相等的话, 就不改变 address 处的值。任何原子操作都可以基于 automicCAS() 实现。
+
+## Online Softmax 实现
+* softmax 是一种激活函数, 可以将一个数值向量归一化为一个概率分布向量。将 $(-\infty, \infty)$ 范围内的数值映射为一个 $(0,1)$ 区间的数值, 公式如下
+$$ Softmax(z_{i})=\frac{e^{z_{i}}}{\sum_{j=1}^n{e^{z_j}}} $$
+* 实际的操作过程中会出现数值溢出的问题, 所以需要减去最大值来缩小数值, 利用的性质就是 $e^{x-\max x} = e^x \times e ^{-\max x}$, 其实就是分子, 分母同时乘以同一个值。
+$$ Softmax(z_{i})=\frac{e^{z_{i}-\max z}}{\sum_{j=1}^n{e^{z_j - \max z}}} $$
+* softmax 的实现其实分成两个步骤, 以输入矩阵为 $M\times N$, 针对每一个行进行 softmax 操作。1. 寻找每一行数据的最大值(需要所有数据)  2. 计算指数和(需要先从所有数据中找到最大值)  3. 计算输出结果, 接下来先是一个简单的 CPU 版本的代码。
+```C++
+// CPU 版本的实现
+void softmax_cpu(float* input, float* output, const int M, const int N) {
+    // 一行一行的处理
+    for (int m = 0; m < M; ++m) {
+        // 先获取这一行的最大值
+        float maxval = -INFINITY;
+        const float* x = input + m * N;
+        for (int n = 0; n < N; ++n) {
+            maxval = x[n] > maxval ? x[n] : maxval;
+        }
+
+        // 依据最大值获取这行的指数和
+        float s = 0.0f;
+        for (int n = 0; n < N; ++n) {
+            s += exp(x[n] - maxval);
+        }
+
+        // 依据这行的最大值和指数和得到输出
+        float* y = output + m * N;
+        for (int n = 0; n < N; ++n) {
+            y[n] = exp(x[n] - maxval) / s;
+        }
+    }
+}
+```
+* Online Softmax 是将前两个循环合并成一个来完成, 即只需要两个循环。第一个循环一边求最大值, 一边求总和。第二个循环仍然是依据第一个循环求得的最大值和指数和遍历得到输出的结果。对于第一个循环, 假设遍历到了下标 $i$, 求得了 $sum$ 和 $max$, 当 $x_{i} > max$ 时, 对于 $sum$ 的更新方式为 $sum=e^{max-x_{i}}\times sum + e^{x{i}-x{i}}$, 更新最大值 $max$。以下是 C++ 代码:
+```C++
+// online 的 softmax cpu 版本
+void online_softmax_cpu(float* input, float* output, const int M, const int N) {
+    // 一行一行的处理
+    for (int m = 0; m < M; ++m) {
+        const float* x = input + m * N;
+        // 两个循环合并成一个(合并求最大值和求指数和)
+        float maxval = -INFINITY;  // 这里初始化为 负无穷也是有讲究的, 对于第一次计算 s, 前一项为 0
+        float s = 0.0f;
+        for (int n = 0; n < N; ++n) {
+            float bigger = std::max(maxval, x[n]);          // 历史最大值和当前值选个大的
+            s = s * exp(maxval-bigger) + exp(x[n]-bigger);  // 历史最大值是否更迭, 都能用这个公司。假如没有更迭, 前一项就是 s, 更迭的话前一项就会更新, 后一项是没有任何问题的。
+            maxval = bigger;                                // 始终每一步都取得最大值
+        }
+
+        // 第二个循环, 依据最大值和指数和输出得到结果
+        float* y = output + m * N;
+        for (int n = 0; n < N; ++n) {
+            y[n] = exp(x[n] - maxval) / s;
+        }
+    }
+}
+```
+* GPU 上加速 Softmax 的方法一般有, warp 处理一行和 block 处理一行。warp 处理一行的思路是: 每个线程维护一个最大值, 指数和, 遍历数据进行迭代。然后就是 warp 内的规约, 利用 `__shfl_xor_sync()`, 先得到其对应的线程的 最大值和指数和, 然后根据最大值的大小关系判断更新那一个, 最后 sum += offsetsum。warp 中的每个线程都拿到了整个行的最大值和指数和, 遍历输出结果就可以啦。
+```C++
+// blockSize = 128, 每个 warp 处理一个行。
+// dim3 grid((M*32 + blockSize-1)/blockSize, 1, 1);  dim3 block(blockSize, 1, 1);
+__global__ void online_softmax_kernel3(float* __restrict__ input, float* __restrict__ output, const int M, const int N) {
+    const int tid = threadIdx.x;                         // 块中的线程索引 id
+    const int warpId = tid / warpSize;                    // 此线程位于块内的第几个 warp
+    const int laneId = tid % warpSize;                    // 此线程位于一个 warp 中的线程索引
+    const int warpsPerBlock = blockDim.x / warpSize;      // 一个 block 的 warp 个数
+    const int numWarps = warpsPerBlock * gridDim.x;       // 一个 grid 中总的 warp 个数
+    const int idx = warpsPerBlock * blockIdx.x + warpId;  // 当前这个 warp 的 id
+
+    for (int m = idx; m < M; m += numWarps) {  // 这里其实就已经把可能多分配的 warp 给排除了
+        // 1) 找对每个 warp 对应的输入和输出的位置
+        const float* x = input + m * N;
+        float* const y = output + m * N;
+
+        // 2) 先将值汇总到每个线程的寄存器中。经过这里的步骤之后, 每个线程中保留了其负责的那部分数据的最大的值和指数和。
+        float maxval = -INFINITY, sum = 0.0f;  // 
+        for (int i = laneId; i < N; i += warpSize) {
+            float bigger = fmaxf(maxval, x[i]);  // 得到更大的值
+            sum = sum * expf(maxval - bigger) + expf(x[i] - bigger);  // 这里就没有判断了, 直接做就可以啦
+            maxval = bigger;
+        }
+
+        // 3) warp 内的规约, 因为 warp 中的每个线程都保留了其负责那部分数据的最大值和指数和, 这里要对这些部分进行规约。
+        for (int offset = warpSize / 2; offset > 0; offset >>= 1) {
+            // 在一个 warp 内部强制同步，确保在调用该函数之前的所有指令已经被所有参与同步的线程执行完毕，随后这些线程才继续执行后续的代码。它类似于 CPU 编程中的屏障（barrier），但仅限于 warp 内部。通常用于一个 warp 中有条件分支, 可能会有某些线程会提前执行到某一行代码, 而其他线程还没有执行完之前的部分。
+            __syncwarp();  // warp 内的同步操作
+            // 先得到与自己对应的那个线程的最大值和指数和。
+            float offsetMax = __shfl_xor_sync(0xFFFFFFFF, maxval, offset);  // 得到其他局部块的最大值
+            float offsetSum = __shfl_xor_sync(0xFFFFFFFF, sum, offset);     // 得到其他局部块的指数和
+            // 一定是根据这两个线程对应的数据, 更新最大值和指数和
+            if (maxval < offsetMax) {  // 如果本线程的比另一个线程的最大值小, 更新自己的最大值和指数和
+                sum *= expf(maxval - offsetMax);  // 将自己的 sum 乘以 exp
+                maxval = offsetMax;               // 将自己的 maxval 更新
+            } else {  // 本线程的比另一个线程的最大值大, 更新另一个线程指数和
+                offsetSum *= expf(offsetMax - maxval);  // 更新另一个块的
+            }
+            sum += offsetSum;  // 最后肯定是 更新自己块+其他块   或  自己块+更新其他块
+        }
+
+        // 4) 这样操作一遍, warp 中的每个线程的最大值和指数和都是全局的了, 直接遍历一次得到最终结果
+        for (int i = laneId; i < N; i += warpSize) {
+            y[i] = expf(x[i] - maxval) / sum;
+        }
+    }
+}
+```
+* 以下代码是 GPU 上, block 处理一行的思路。blockSize 大小为 128 的话, 一个 block 中有 4 个 warp。将一行的数据均分给每个warp, 找到每个 warp 的数据起始位置和终止位置。然后归约到 warp 内每个线程的寄存器上(迭代的方法来做)。warp 内的规约, 就是先求最大值再求指数和。将数据放到第一个 warp 上, 利用shared memory 将数据放到第一个 warp 的线程中, 然后再来规约(迭代的规约方法)。最终通过 SM, 将结果同步到块内的每个线程, 然后计算求值。
+```C++
+// 每个 block 处理一行, dim3 grid(M, 1, 1);  dim3 block(blockSize, 1, 1);
+// shared_memory 的大小为 numwarp*2*sizeof(float), 前 numwarp 个 float 存放的是每个 warp 对应数据的最大值;
+// 后 numwarp 个 float 存放的是每个 warp 对应的数据的指数和
+__global__ void online_softmax_kernel4(float*__restrict__ input, float*__restrict__ output, const int M, const int N) {
+    // further, each block handles one row
+    if (blockIdx.x < M) {
+        extern __shared__ float shared[];
+        const int laneId = threadIdx.x % warpSize;                // warp 中第几个线程
+        const int warpId = threadIdx.x / warpSize;                // block 中第几个 warp
+        // 计算每个 block 中的 warp 个数和每个 warp 负责的数据总个数
+        const int warpsPerBlock = ceilDiv(blockDim.x, warpSize);  // 每个 block 中 warp 的个数
+        const int dataPerWarp = ceilDiv(N, warpsPerBlock);        // 每个 warp 负责的数据总个数
+        // 得到每个 warp 负责数据的起始位置和终止位置
+        const int start = dataPerWarp * warpId;                   // 每个 warp 负责的数据开始的位置
+        const int end = min((warpId + 1) * dataPerWarp, N);       // 每个 warp 负责的数据结束的位置
+        const float* x = input + blockIdx.x * N;
+        float* const y = output + blockIdx.x * N;
+
+        // 获取最大值起始位置的共享内存
+        float* const maxVals = shared;                  // 先存放每个 warp 的最大值
+        // 获取指数和起始位置的共享内存
+        float* const sumVals = shared + warpsPerBlock;  // 再存放每个 warp 的指数和
+
+        // 每个 warp 先将其负责的部分数据归约到自己的寄存器中
+        float maxval = -INFINITY, sumval = 0.f;
+        for (int i = start + laneId; i < end; i += warpSize) {
+            float newLaneMax = fmaxf(maxval, x[i]);  // 每检索一个 x, 就求一次最大值
+            sumval = sumval * expf(maxval - newLaneMax) + expf(x[i] - newLaneMax);  // 依据最大值进行更新
+            maxval = newLaneMax;
+        }
+
+        // 每个 warp 内进行规约, 得到 warp 内最大值和指数和, 其实这里就没有是求 max 和 求 sum 进行同时处理
+        float maxvalOld = maxval;            // 保留每个线程中旧的 maxVal
+        maxval = warpReduceMax(maxval);      // warp 内进行 MaxReduce, 得到一个 warp 中的最大的 maxval
+        sumval *= expf(maxvalOld - maxval);  // 更新每个线程中指数和
+        sumval = warpReduceSum(sumval);      // 得到一个 warp 内指数和的 Reduce
+
+        // 将warp 中的数据放到共享内存中, 为了后续的 warp 间的规约
+        if (laneId == 0) {
+            maxVals[warpId] = maxval;
+            sumVals[warpId] = sumval;
+        }
+        __syncthreads();
+        // re-init for the next block reduce process
+
+        // 在一个 block 中, 将每个 warp 内的结果放倒共享内存中
+        if (warpId == 0) {
+            // 通过 shared_memory 将数据取到第 0 个 warp 的线程的寄存器中
+            if (laneId < warpsPerBlock){
+                maxval = maxVals[laneId];
+                sumval = sumVals[laneId];
+            } else {
+                maxval = -INFINITY;  // 没有的默认值
+                sumval = 0.f;
+            }
+            // 对第 0 warp 进行再次规约操作, 这时候 Max 和 sum 就是同时来做了
+            for (int offset = warpSize / 2; offset > 0; offset >>= 1) {
+                float otherMax = __shfl_xor_sync(0xFFFFFFFF, maxval, offset);
+                float otherSum = __shfl_xor_sync(0xFFFFFFFF, sumval, offset);
+                if (maxval < otherMax) {
+                    sumval = sumval * expf(maxval - otherMax) + otherSum;
+                    maxval = otherMax;
+                } else {
+                    sumval += otherSum * expf(otherMax - maxval);
+                }
+            }
+        }
+        __syncthreads();
+
+        // 利用共享内存做为中间介质, 将整个 block 的最大值和指数和发送给每个线程
+        // update the blockwise sum and max to smem
+        if (warpId == 0 && laneId == 0) {
+            maxVals[0] = maxval;
+            sumVals[0] = sumval;
+        }
+        __syncthreads();
+
+        // 将值传递给每个线程
+        // warps take the blockwise max and sum and do the final calculation
+        float blockSum = sumVals[0], blockMax = maxVals[0];
+        for (int i = start + laneId; i < end; i += 32) {
+            y[i] = expf(x[i] - blockMax) / blockSum;
+        }
+    }
+}
+```
+## RoPE 旋转位置编码
+* Llama2 中在每个 Attention 层中分别对 Q 和 K 进行旋转位置编码, 也就说在每次计算 Attention 时都分别要对 `Q` 和 `K` 进行旋转位置编码。
+* RoPE 的出发点就是 `通过绝对的位置编码方式实现相对位置编码`, 通过给 q, k 添加绝对位置信息, 如以下公式所示, 经过 `attention` 处理之后, 会对 $\bar{q}_m, \bar{k}_n$ 进行内积运算, 带入 $m-n$ 的这个相对位置信息, 其中 $f_q(x_m, m)$ 和 $f_k(x_n, n)$ 都是待求解的函数。
+$$\bar{q}_m=f_q(x_m, m), \bar{k}_n=f_k(x_n, n), <f_q(x_m, m), f_k(x_n, n)>=g(x_m, x_n, m-n)$$
+* 最终得到的解为, 这个是 $d=2$ 的情况, 当 $d>2$ 时, 可以通过两两一组的方式来实现这种机制, 起始从矩阵可以看出, 就是两个为一组, 逆时针旋转 $m\theta$ 角度。
+    ![](./fig/rope_enq.png)
+* 其中 m 和 $\theta$ 的求取公式为, $m\in[0, 1, 2, 3, ..., maxSeq-1]$, m 就是在这个句子中的第几个 token, $\theta _{i}=\frac{1}{10000^{\frac{2i}{d}}}, i\in [0, 1,..., \frac{d}{2}-1]$, $\theta$ 就是针对隐藏层的维度来说的, 两两一组有一个唯一的 $\theta$, 然后就能得到 $m\theta$, 直接旋转就可以了。
+```Python
+# RoPE 是应用在形状为 [bs, num_head, seq_len, head_dim] 张量上, RoPE 被应用到查询 Q 和 K 向量的每个注意 head 上
+import torch
+
+bs = 1              # batchSize
+seq_len = 10        # 当前句子的长度
+max_seq_len = 128   # 最大的句子长度
+num_head = 32       # 头的个数
+head_dim = 64       # 隐藏层维度
+
+# 依据隐藏层维度 dim, 最大句子长度 end, base, 得到一个 [end, dim/2] 大小的结果(其中的每个值时 m\theta) -> [end, dim/2](复数的形式, 笛卡尔坐标系)
+def precompute_freqs_cis(dim, end, base=10000.0):
+    theta = 1.0 / (base ** (torch.arange(0, dim, 2) / dim)) # [dim/2]       eg: [32]
+    m = torch.arange(end)                                   # [end]         eg: [128]
+    freqs = torch.outer(m, theta)                           # [end, dim/2]  eg: [128, 32], 这里是计算外积
+    freqs_cis = torch.polar(torch.ones_like(freqs), freqs)  # 转换成复数, 模长为1, 角度为 m\theta, cis 代表 cos + isin
+    return freqs_cis                                        # [end, dim/2]  eg: [128, 32]
+
+xq = torch.randn([bs, seq_len, num_head*head_dim])                    # [1, 10, 32*64]
+xq = xq.reshape([bs, seq_len, num_head, head_dim]).transpose(1, 2)    # [1, 32, 10, 64]
+print(xq.reshape(*xq.shape[:-1], -1, 2).shape)                        # [1, 32, 10, 32, 2]
+xq_ = torch.view_as_complex(xq.reshape(*xq.shape[:-1], -1, 2))        # [1, 32, 10, 32], 变成复数后最后一个维度减半了，因为相邻两个元素组成了一个复数
+freqs_cis = precompute_freqs_cis(head_dim, max_seq_len)               # [128, 32], 矩阵中每个元素都是复数，实部是cos，虚部是sin
+freqs_cis_ = freqs_cis[:seq_len].unsqueeze(0).unsqueeze(1)            # [1, 32, 10, 32], 取出需要的那个部分编码参数
+rope_q_ = xq_ * freqs_cis_                                            # [1, 32, 10, 32], 复数相乘
+print(torch.view_as_real(rope_q_).shape)                              # [1, 32, 10, 32, 2], 视为实数
+rope_q = torch.view_as_real(rope_q_).flatten(-2)                      # [1, 32, 10, 64]  # 把复数表示全部还原成了实数
+
+# 其实计算的原理就是
+# 原始的旋转的方式
+    R             Wx 
+[[cos  -sin]      [x1    =    [x1*cos - x2*sin      #结果元素1
+ [sin   cos]]      x2]         x1*sin + x2*cos]     #结果元素2
+# 变成复数相乘的形式, 也得到了同样的结果
+(x1 + jx2) * (cos + jsin) = (x1*cos - x2*sin) + j(x1*sin+x2*cos)
+```
+* CUDA 代码的实现方式如下所示。输入是 [bs, seq_len, num_head, head_dim], 这里使用了常量内存 `__constant__`, 存储了提前计算的 `cos(m\theta)` 和 `sin(m\theta)`, cos_theta_p 和 sin_theta_p 的大小均为 [seq_len, num_pair], 注意这里是 `num_pair`, 为 head_dim/2。
+* 线程的组织分配方式为 dim3 grid(num_head, seq_len, bs); dim3 block(32); 每个 block 是一包含一个 warp。kernel 中依据每个线程所在的 seq_id 和在 num_pair 中的位置来偏移 cos_theta_p 和 sin_theta_p。一个warp遍历的范围直接为 num_pair, 相当于直接组合好了。
+```C++
+// batchSize 为 2, seq_len 为 64, num_head 为 32, head_dim 为 128
+#define NUM_PAIRS 64  // head_dim / 2
+#define SEQ_LEN 64
+
+// Precomputed θ_i values stored in constant memory, 存储角度值
+__constant__ float theta[NUM_PAIRS];
+
+// Precomputed cosine and sine values for θ_i * p, 存储 m*theta 的 sin 和 cos 值, 形状是 [seq_len, num_pairs], 先存 seq_len 的所有 num_pair
+__constant__ float cos_theta_p[NUM_PAIRS * SEQ_LEN];
+__constant__ float sin_theta_p[NUM_PAIRS * SEQ_LEN];
+
+__global__ void RoPE(float *x, int batchSize, int seq_len, int num_head, int head_dim) {
+    // Each block processes one (batch_id, seq_id, head_id)
+    int batch_id = blockIdx.z;
+    int seq_id = blockIdx.y;
+    int head_id = blockIdx.x;
+    int tid = threadIdx.x;
+
+    int num_pairs = head_dim / 2;
+    int total_threads = blockDim.x;    // 一个 block 中的总的线程个数
+
+    int p = seq_id;
+    int theta_offset = p * num_pairs;  // 找 theta 的偏移
+
+    for (int i = tid; i < num_pairs; i += total_threads) {
+        int idx = 2 * i;
+
+        // Retrieve precomputed cosine and sine values
+        float cos_theta = cos_theta_p[theta_offset + i];
+        float sin_theta = sin_theta_p[theta_offset + i];
+
+        // Compute offset
+        int offset = batch_id * seq_len * num_head * head_dim 
+                        + seq_id * num_head * head_dim + 
+                            head_id * head_dim + idx;
+
+        float x1 = x[offset];
+        float x2 = x[offset + 1];
+
+        // Apply rotation
+        float x1_new = x1 * cos_theta - x2 * sin_theta;
+        float x2_new = x1 * sin_theta + x2 * cos_theta;
+
+        // Write back
+        x[offset] = x1_new;
+        x[offset + 1] = x2_new;
+    }
+}
+```
+## 常量内存
+* CUDA 常量内存是 CUDA 中的一种特殊的内存类型, 专门用于存储在设备代码中的不变数据。常量内存的容量较小, 通常为 64KB, 常见的使用方法如下:
+    - 定义常量内存: 通过 `__constant__` 关键字定义在设备端。
+    - H2D: 在主机端通过 `cudaMemcpyToSymbol()` 从主机端将数据复制到常量内存中。
+    - 在device的内核中使用: 常量内存数据只能在设备端读取, 不可修改, 用法与普通的数组一致。
+    - D2H: 通过 `cudaMemcpyFromSymbol()` 从设备端常量内存拷贝到主机端。
+```C++
+#include <cuda_runtime.h>
+#include <iostream>
+
+__constant__ float constData[256];  // 定义常量内存
+
+__global__ void kernel() {
+    // 设备端代码可以读取常量内存
+    printf("Thread %d: constData[0] = %f\n", threadIdx.x, constData[0]);
+}
+
+int main() {
+    float hostData[256];
+    
+    // 初始化数据
+    for (int i = 0; i < 256; ++i) {
+        hostData[i] = static_cast<float>(i);
+    }
+
+    // 将数据从主机端拷贝到设备端的常量内存
+    cudaMemcpyToSymbol(constData, hostData, sizeof(hostData), 0, cudaMemcpyHostToDevice);
+
+    // 启动内核，读取常量内存中的数据
+    kernel<<<1, 10>>>();
+    cudaDeviceSynchronize();
+
+    // 从常量内存拷贝回主机
+    float resultData[256];
+    cudaMemcpyFromSymbol(resultData, constData, sizeof(resultData), cudaMemcpyDeviceToHost);
+
+    // 打印拷贝回来的数据，确认是否正确
+    std::cout << "Data copied from constant memory back to host: " << resultData[0] << std::endl;
+
+    return 0;
+}
+```
+* 常量内存的适用场景:
+    - 小规模共享的常量数据: 常量内存的大小通常是固定且较小的, 常用于存储配置参数, 查找表, 而且其是全局可见的, 所有线程都可以访问相同的常量数据。
+    - 更适合于一个 warp 中的大部分线程访问同一个地址: 当常量内存被所有线程以相同的地址访问时，它会被常量缓存加载，这样可以显著提升内存访问速度。
+* 常量内存相比于 global 的优势:
+    - 缓存机制: 利用常量缓存提升了读取速度, 而 global memory 没有这样的缓存, 且访问延迟更高。
+    - 更低的带宽消耗: 由于常量缓存的存在, 其读取效率通常高于 global memory, 其是在访问模式局部性好的情况下, 占用更少的带宽。
+    - 常量缓存是一个较为特定的缓存机制，主要提升访问常量数据的效率，而 L1 和 L2 缓存是更通用的缓存，用于加速对全局内存和局部内存的访问。

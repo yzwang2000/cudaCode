@@ -64,7 +64,7 @@ __global__ void gemm(float* __restrict__ A, float* __restrict__ B, float* __rest
 
 int main(){
     dim3 grid(N/block_n, M/block_m, 1);
-    dim3 block(block_n/thread_n, block_m/thread_m);
+    dim3 block(block_n/thread_n, block_m/thread_m, 1);
 
     return 0;
 }
