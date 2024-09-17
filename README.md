@@ -1503,6 +1503,24 @@ __global__ void online_softmax_kernel4(float*__restrict__ input, float*__restric
     }
 }
 ```
+* Softmax 中还会引入 temperature。越低的温度使模型对其首选越有信心，而高于1的温度会降低信心。0 温度相当于 argmax 似然，而无限温度相当于均匀采样。
+$$ Softmax(z_{i})=\frac{e^{\frac{z_{i}-\max z}{T}}}{\sum_{j=1}^n{e^{\frac{z_j - \max z}{T}}}} $$
+* 以下代码的测试中, 结果如图所示, 温度 T 越高, 各个 token 之间的概率相差越小, 越容易采到一些乱 token, 但是创造性强, 温度 T 越低, 各个 token 之间相差越大, 语句越通顺:
+```Python
+import numpy as np
+
+def softmax_with_t(x, T=1):
+    return np.exp(x/T)sum(np.exp(x/T))
+
+plt.figure(figsize=(6,3))
+logits = np.asarray([1, 5, 7, 10])
+Ts = [0.01, 0.1, 1, 10, 100, 1000]
+for T in Ts:
+    plt.plot(softmax_with_t(logits, T), '-o')
+plt.legend(['T=0.01', 'T=0.1', 'T=1', 'T=10', 'T=100'])
+```
+![](./fig/softmax_with_T.png)
+
 ## RoPE 旋转位置编码
 * Llama2 中在每个 Attention 层中分别对 Q 和 K 进行旋转位置编码, 也就说在每次计算 Attention 时都分别要对 `Q` 和 `K` 进行旋转位置编码。
 * RoPE 的出发点就是 `通过绝对的位置编码方式实现相对位置编码`, 通过给 q, k 添加绝对位置信息, 如以下公式所示, 经过 `attention` 处理之后, 会对 $\bar{q}_m, \bar{k}_n$ 进行内积运算, 带入 $m-n$ 的这个相对位置信息, 其中 $f_q(x_m, m)$ 和 $f_k(x_n, n)$ 都是待求解的函数。
@@ -1647,3 +1665,247 @@ int main() {
     - 缓存机制: 利用常量缓存提升了读取速度, 而 global memory 没有这样的缓存, 且访问延迟更高。
     - 更低的带宽消耗: 由于常量缓存的存在, 其读取效率通常高于 global memory, 其是在访问模式局部性好的情况下, 占用更少的带宽。
     - 常量缓存是一个较为特定的缓存机制，主要提升访问常量数据的效率，而 L1 和 L2 缓存是更通用的缓存，用于加速对全局内存和局部内存的访问。
+
+## 大模型采样策略
+* 在文本生成任务中, 需要让模型逐个预测每个 token, 直到达到终止条件(特殊符号或最大长度)。在每一步的预测中, 模型会给出一个概率分布(softmax), 表示它对下一个单词的预测。如何从这个概率分布中选择下一个单词, 这个就是采样策略。常见的方法有:
+    - 贪心策略: 直接选取概率最高的单词。简单高效, 但是会导致生成的文本过于单调和重复。
+    - 随机采样(top-k 和 top-p): 按照概率分布随机选择一个单词。增加生成的多样性, 可能会导致文本不连贯和无意义。
+    - Beam Search: 维护大小为 k 的候选序列集合, 每一步都从每个候选序列的概率分布中选择概率最高的 k 个单词, 然后保留总概率最高的 k 个候选序列。可以平衡生成质量和多样性, 但是可能导致生成的文本过于保守和不自然。
+* top-k 和 top-p 均是依概率分布进行选择, 但是其选择的范围并不是所有是 token。其均是先依据概率对 token 进行排序, top-k 是从前 k 个 token 中以概率选取, top-p 是先排序后的概率累加和, 选取概率累加和刚好超过 p 的所有 token, 然后在这里进行依概率选取。
+* 以下是 `top-k` 的 `Python` 代码:
+```Python
+# k 越大，生成的多样性越高，但是生成的质量越低；k 越小，生成的质量越高，但是生成的多样性越低
+# k 取值多少是非常难以确定的
+import torch
+
+def top_k_sampling(logits, k):
+    """
+    从给定的 logits 中使用 Top-k 采样策略选择下一个词的索引。
+
+    参数：
+    - logits: 张量，形状为 (vocab_size,) 这个是 softmax 之后输出的概率分布
+    - k: 整数, 表示选择概率最高的前 k 个词
+
+    返回：
+    - 选中词的索引（整数）
+    """
+    # 获取 logits 的前 k 个值及其对应的索引
+    topk_logits, topk_indices = torch.topk(logits, k)
+
+    # 对前 k 个 logits 应用 softmax，得到概率分布
+    topk_probs = torch.nn.functional.softmax(topk_logits, dim=0)
+
+    # 从概率分布中随机采样一个词的索引
+    sampled_index = torch.multinomial(topk_probs, num_samples=1)
+
+    # 映射回原始词汇表的索引
+    token_index = topk_indices[sampled_index]
+
+    return token_index.item()
+```
+* top-p 在每一步，只从累积概率超过某个阈值 p 的最小单词集合中进行随机采样，而不考虑其他低概率的单词, 这种方法也被称为核采样(nucleus sampling), 因为只关注核心的部分, 忽略了尾部的部分。避免采样到一些不合适或不相关的单词，同时也可以保留一些有趣或有创意的单词。`top-p` 代码如下所示:
+```Python
+import torch
+
+def top_p_sampling(logits, p):
+    """
+    从给定的 logits 中使用 Top-p (核) 采样策略选择下一个词的索引。
+
+    参数：
+    - logits: 张量，形状为 (vocab_size,)  softmax 之后的结果
+    - p: 浮点数，概率阈值，范围在 (0, 1] 之间
+
+    返回：
+    - 选中词的索引（整数）
+    """
+    # 对 logits 应用 softmax，得到概率分布
+    probs = torch.nn.functional.softmax(logits, dim=0)
+
+    # 按概率从大到小排序
+    sorted_probs, sorted_indices = torch.sort(probs, descending=True)
+
+    # 计算累积概率
+    cumulative_probs = torch.cumsum(sorted_probs, dim=0)
+
+    # 找到累积概率超过阈值 p 的位置
+    cutoff_index = torch.where(cumulative_probs > p)[0][0]
+
+    # 截断概率分布
+    selected_probs = sorted_probs[:cutoff_index + 1]
+    selected_indices = sorted_indices[:cutoff_index + 1]
+
+    # 重新归一化被截断的概率分布
+    normalized_probs = selected_probs / selected_probs.sum()
+
+    # 从归一化的概率分布中采样一个索引
+    sampled_index = torch.multinomial(normalized_probs, num_samples=1)
+
+    # 映射回原始词汇表的索引
+    token_index = selected_indices[sampled_index]
+
+    return token_index.item()
+```
+* Beam-search 是一种启发式搜索算法, 与贪心搜索不同, Beam Search 在每个时间步保留了 k 个最有可能的部分序列, 从而在搜索空间中探索更多的可能性，提高生成序列的质量。以下是 Python 代码:
+![](./fig/log_softmax.png)
+```Python
+# 可以发现以下的代码中使用了 log_softmax, 原理是因为 log 是单调递增的, log_softmax 与 softmax 的各个元素的排序结果是一样的。优势主要有:
+# 1. 在 Beam Search 中，我们需要比较不同序列的总概率。由于概率值很小，累乘可能导致下溢出。使用对数概率，可以将乘法转换为加法，避免数值问题。
+# 2. 减少乘除操作, 加快计算速度。
+import torch
+import torch.nn.functional as F
+
+def beam_search(model, input_ids, beam_width, max_length, tokenizer):
+    """
+    使用 Beam Search 生成序列。
+
+    参数：
+    - model: 语言模型，例如 GPT 或其他 Transformer 模型
+    - input_ids: 初始输入的 token ids，形状为 (1, sequence_length)
+    - beam_width: Beam Search 的宽度（保留的候选序列数量）
+    - max_length: 生成序列的最大长度
+    - tokenizer: 分词器，用于解码 token ids
+
+    返回：
+    - 生成的序列列表，按得分从高到低排序
+    """
+    # 全局的, 初始化序列，分数和完成状态, 记录每个序列的状态和概率
+    sequences = [(input_ids, 0.0)]
+    complete_sequences = []  # 存放最终的结果
+
+    for _ in range(max_length):
+        all_candidates = []  # 存放所有序列的扩展候选, 对候选序列选前 top-k 个, 做为新的 seqences
+        # 对于当前的每个序列，扩展候选 
+        for seq, score in sequences:  # 这里的 seq 是一个 Tensor 
+            # 如果序列已经达到结束标记，则跳过扩展
+            if seq[0, -1].item() == tokenizer.eos_token_id:
+                complete_sequences.append((seq, score))
+                continue
+
+            # 模型前向传播，获取下一个 token 的 logits
+            with torch.no_grad():
+                outputs = model(seq)
+                logits = outputs.logits[:, -1, :]  # 取最后一个时间步的输出
+
+            # 对 logits 应用对数概率
+            log_probs = F.log_softmax(logits, dim=1)
+
+            # 选择 beam_width 个最可能的下一个 token
+            topk_log_probs, topk_indices = torch.topk(log_probs, beam_width)
+
+            # 为每个可能的下一个 token 创建新的候选序列
+            for i in range(beam_width):
+                next_token = topk_indices[0, i].unsqueeze(0).unsqueeze(0)
+                next_score = score + topk_log_probs[0, i].item()
+                candidate_seq = torch.cat([seq, next_token], dim=1)
+                all_candidates.append((candidate_seq, next_score))
+
+        # 从所有候选序列中选择得分最高的 beam_width 个序列做为新的 sequcences
+        sequences = sorted(all_candidates, key=lambda x: x[1], reverse=True)[:beam_width]
+
+        # 如果所有序列都已完成，提前退出
+        if len(sequences) == 0:
+            break
+
+    # 将未完成的序列加入完成的序列中
+    complete_sequences.extend(sequences)
+    # 根据得分对完成的序列进行排序
+    complete_sequences = sorted(complete_sequences, key=lambda x: x[1], reverse=True)
+
+    # 解码序列
+    generated_sequences = []
+    for seq, score in complete_sequences:
+        text = tokenizer.decode(seq.squeeze(), skip_special_tokens=True)
+        generated_sequences.append((text, score))
+
+    return generated_sequences
+```
+## LayerNorm
+* LayerNorm 更多的被用于 NLP 领域, 其公式如下:
+$$ LayerNorm(x)=weight*\frac{x-mean(x)}{\sqrt{var(x)+x}} + bias $$
+* 整体的优化思路有以下几点:
+    - 使用每个 warp 处理一行, 一共需要 $B\times C$ 个 warp。
+    - Var(X) 是方差, 方差可以通过 $Var(x)=E(X^2)-E(X)^2$
+    - 因为会多次用到输入数据, 输入数据都是存放在 DARM 中的, 所以可以第一次读取 DARM 的时候就将数据缓存到 SM 中
+    - Var(X) 变形原理如下图所示:
+    ![](./fig/方差推导定义.png)
+* CUDA 代码如下所示:
+```C++
+#include <cuda_runtime.h>
+
+// 输入矩阵的大小为 (B, T, C) = (8, 1024, 768)  B 为 batchSize, T 为 sequence 的长度, C 是 embedding 的维度
+constexpr int B = 8;
+constexpr int T = 1024;
+constexpr int C = 768;
+constexpr int eps = 1e-5;
+constexpr int blockSize = 128;
+
+// 这个没什么心意, 就是注意这里可以进行 unroll
+template <typename T1>
+__device__ T1 warpReduceSum(T1 val) {
+    #pragma unroll
+    for (int offset = warpSize / 2; offset > 0; offset >>= 1) {
+        val += __shfl_xor_sync(0xFFFFFFFF, val, offset);
+    }
+    return val;
+}
+
+// 1. 利用了个公式 Var(X) = E(x^2) - E(X)^2, 这样就能节省一个循环
+// 2. 每个 warp 处理一行
+// 3. 因为 输入数据会被多次用到, 所以利用 shared_memory 来进行缓存输入数据
+__global__ void layernorm_forward_kernel6(float *input, float *out, float *weight,
+                                          float *bias, float eps, int B, int T, int C) {
+    // one warp one row
+    // use smem to store the shift (x - mean) values
+    // use D(X) = E(X^2) - E(X)^2
+    assert((C % warpSize) == 0);
+    extern __shared__ float sharedX[];
+    int warpsPerBlock = blockDim.x / warpSize;           // 每个 block 中的 warp 个数
+    int warpId = threadIdx.x / warpSize;                 // 当前线程的 warp id
+    int laneId = threadIdx.x % warpSize;                 // 当前线程的 lane id
+    int numWarps = gridDim.x * warpsPerBlock;            // grid 的所有 warp 个数
+    float *const xSharedWarp = sharedX + warpId * C;     // 当前 warp 用到的 SM 的起始地址
+
+    for (int row = blockIdx.x * warpsPerBlock + warpId; row < B * T; row += numWarps)
+        if (row < B * T) {
+            // 定位到当前 warp 处理的全局内存的起始地址
+            float *const x = input + row * C;
+            float *const y = out + row * C;
+
+            float partialSum = 0.0f, partialSum2 = 0.0f;
+            for (int i = laneId; i < C; i += warpSize) {
+                float xi = x[i];     // 先从共享内存读取到寄存器中, 这样再从寄存器到其他的寄存器和 SM 就快了
+                xSharedWarp[i] = xi;
+                partialSum += xi;
+                partialSum += xi * xi;
+            }
+
+            float mean = warpReduceSum(partialSum) / C;    // warp 规约求 E(X)
+            float mean2 = warpReduceSum(partialSum2) / C;  // warp 规约求 E(X^2)
+            float var = (mean2 - mean * mean);             // 依据公式求得方差
+            float inv_std = 1.0f / sqrt(var / C + eps);
+
+            // 写到输出中
+            for (int i = laneId; i < C; i += warpSize) {
+                y[i] = weight[i] * (sharedX[i] - mean) * inv_std + bias[i];
+            }
+        }
+}
+
+int main(){
+
+    float *inputGPU = nullptr;
+    float *outputGPU = nullptr;
+    float *weightGPU = nullptr;
+    float *biasGPU = nullptr;
+    cudaMalloc(&inputGPU, B * T * C * sizeof(float));
+    cudaMalloc(&outputGPU, B * T * C * sizeof(float));
+    // weight 和 bias 都是在 C 这个维度展开的
+    cudaMalloc(&weightGPU, C * sizeof(float));
+    cudaMalloc(&biasGPU, C * sizeof(float));
+
+    const int smemSize = blockSize / 32 * C * sizeof(float);  // 每个 warp 处理一个 C, 那就需要 一个block中 warp 个数*C*sizeof(float)
+    layernorm_forward_kernel6<<<B * T * 32 / blockSize, blockSize, smemSize>>>(inputGPU, outputGPU, weightGPU, biasGPU, eps, B, T, C); 
+
+    return 0;
+}
+```
