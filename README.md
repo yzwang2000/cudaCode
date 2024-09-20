@@ -1066,9 +1066,99 @@ int main()
 
 	return 0;
 }
-// 
 ```
 
+## 归并排序
+* 归并排序是建立在归并操作上的一种有效、稳定的排序算法, 该算法是采用 `分治`+`递归` 的思想。思路是将已经有序的子序列合并, 得到完全有序的序列; 即先每个子序列有序, 再使得子序列段间有序。归并排序的时间复杂度是 `O(nlog(n))`, 空间复杂度为 `O(n)`, 适用于数据量大, 稳定性有要求的场景。
+![](./fig/归并排序.png)
+```C++
+#include <iostream>
+#include <vector>
+
+// 合并
+void merge(std::vector<int>& arr, std::vector<int>& tempArr, int left, int mid, int right)
+{
+    // 标记左半区第一个未排序的元素
+    int l_pos = left;
+    // 标记右半区第一个未排序的元素
+    int r_pos = mid + 1;
+    // 临时数组元素的下标
+    int pos = left;  // 当前存到哪里了
+
+    // 合并
+    while (l_pos <= mid && r_pos <= right)
+    {
+        if (arr[l_pos] < arr[r_pos])  // 左半区第一个剩余元素更小, 这里小于号保证了算法的稳定性, 如果是小于等于算法就是不稳定了
+            tempArr[pos++] = arr[l_pos++];
+        else  // 右半区第一个剩余元素更小
+            tempArr[pos++] = arr[r_pos++];
+    }
+
+    // 合并左半区剩余的元素
+    while (l_pos <= mid)
+        tempArr[pos++] = arr[l_pos++];
+
+    // 合并右半区剩余的元素
+    while (r_pos <= right)
+        tempArr[pos++] = arr[r_pos++];
+
+    // 把临时数组中合并后的元素复制回原来的数组, 是在这里将排序后的数组拷贝到原始的输入数组中
+    while (left <= right)
+    {
+        arr[left] = tempArr[left];
+        left++;
+    }
+}
+
+// 归并排序
+void msort(std::vector<int>& arr, std::vector<int>& tempArr, int left, int right)
+{
+    // 如果只有一个元素，那么不需要继续划分
+    // 只有一个元素的区域，本身就是有序的，只需要被归并即可
+    if (left < right)
+    {
+        // 找中间点
+        int mid = left + (right-left) / 2;
+        // 递归划分左半区
+        msort(arr, tempArr, left, mid);
+        // 递归划分右半区
+        msort(arr, tempArr, mid + 1, right);
+
+        // 执行到这里的时候, [left, mid] [mid+1, right] 这两个区间已经有序了(某个区间只有一个元素也是有序), 合并已经排序的部分
+        merge(arr, tempArr, left, mid, right);
+    }
+}
+
+// 归并排序入口
+void merge_sort(std::vector<int>& arr)
+{
+    // 分配一个辅助数组, 空间复杂度就在这里 O(n)
+    std::vector<int> tempArr(arr.size());
+    // 调用实际的归并排序
+    msort(arr, tempArr, 0, arr.size() - 1);
+}
+
+int main()
+{
+    std::vector<int> arr = {38, 27, 43, 3, 9, 82, 10};
+    
+    std::cout << "排序前: ";
+    for (int i : arr)
+        std::cout << i << " ";
+    std::cout << std::endl;
+
+    // 调用排序函数
+    merge_sort(arr);
+
+    std::cout << "排序后: ";
+    for (int i : arr)
+        std::cout << i << " ";
+    std::cout << std::endl;
+
+    return 0;
+}
+
+```
 
 ## YOLOv5 推理优化
 * 预处理部分: yolov5 中的预处理主要由以下三个部分组成:  [B, srcH, srcW, srcC] -> [B, tarC, tarH, tarW]
@@ -1175,6 +1265,120 @@ cudaError_t cudaHostGetDevicePointer(void ** pDevice,void * pHost,unsigned flags
     - 通过捕获提交到 `cudaStreamBeginCapture` 和 `cudaStreamEndCapture` 调用之间流的 GPU 活动来创建 graph。
     - 调用 `cudaStreamInstantiate` 创建 graphExec, 来创建并预初始化所有内核工作描述, 以便他们尽可能的重复启动。
     - 最后通过调用 `cudaGraphLaunch` 将 graphExec 加入到指定的流中。
+
+## CUDA Context
+* CUDA Context 是 CUDA 编程模型中的一个概念, 是对管理 GPU 资源的一种抽象的软件表示。CUDA 提供了 `Runtime API` 和 `Driver API`, 其中 `Runtime API`(以cuda开头) 只能隐式地管理上下文, `Driver API`(以cu开头)可以显示的创建和管理上下文。每个 Context 都包含了与应用程序相关的设备内存(memory)、内核函数(modules)、流(stream)、事件(Event) 等信息。
+![](./fig/context_compose.png)
+* 主要特点和实际应用：
+    - 不同的 CUDA Context 之间是彼此独立的, 一个 Context 内的操作不会影响到另一个 Context。
+    - 在多 GPU 系统中, 每个 GPU 设备通常都有自己的 CUDA Context, 程序需要在不同的 CUDA Context 之间切换以控制不同的 GPU。
+    - CUDA 驱动为每个 CPU 线程都维护了内部的 context 栈, 活跃的线程为当前栈顶的 context。同一个context可以被进程内所有线程使用。需要注意如果一个context被推入多个线程的栈中, 在某一个线程里destroy, 依然在其他线程context栈中, 若不在当前context栈顶, 是可能保存在栈中被后续使用到引发错误。一个 context 在同一线程中可以被多次入栈, 栈中可以保存多个相同context, 因此需要用户控制 context 出入栈成对使用, 调用destroy的逻辑要谨慎以保证逻辑正确。
+* primary context: primary Context 对每个 Device 只有一个, 不能被 destory, 是由驱动维护的。cudaSetDevice只会把对应 Device 的 primary context 设置为栈顶context。对于大多数的场景, 只需要 `Runtime API` 和 `primary context` 就够了, 而且 Device 上如果创建了过多的context也是对资源的浪费，context会占用默认数量的显存，对显存要求较高的场景，多个context可能会引入显存不够的问题。
+* `cudaMalloc/cuMemAlloc` 申请的显存和 `cudaMallocHost/cuMemAllocHost` 申请的 host 内存, 是由当前 context 管理的, 属于当前 context 所对应的 device。但是其对当前 device 上的其他的 context 是可见的, 对于其他 device 上的 context 也是可见的。这个是 CUDA Context 与 CPU 进程有明显区别的地方。
+* 以下是实际中的使用场景:
+```C++
+// 多线程环境的上下文管理, 每个线程独立地与 GPU 交互。问了避免上下文冲突, 需要确保每个线程正确的管理自己的 CUDA 上下文。
+// 每个线程调用 cudaSetDevice(device), 设置其使用的 GPU 设备, 其实就是会把对应 Device 的 primary context 设置为栈顶 context。
+#include <cuda_runtime.h>
+#include <thread>
+#include <vector>
+#include <iostream>
+
+void gpuTask(int device) {
+    cudaSetDevice(device);
+
+    // 在该线程中执行 GPU 操作
+    // 分配内存、启动内核等
+    // ...
+
+    // 线程结束时，CUDA 资源会自动释放
+}
+
+int main() {
+    int deviceCount = 0;
+    cudaGetDeviceCount(&deviceCount);
+
+    std::vector<std::thread> threads;
+    for (int device = 0; device < deviceCount; ++device) {
+        threads.emplace_back(gpuTask, device);
+    }
+
+    // 等待所有线程完成
+    for (auto& t : threads) {
+        t.join();
+    }
+
+    return 0;
+}
+```
+```C++
+// 同一个线程管理多个设备, 让每个设备执行不同的任务。但是上下文切换会带来性能开销，应尽量减少切换次数。
+// 上下文创建和销毁成本高：应尽量重用上下文，避免频繁的创建和销毁操作。
+// cuDeviceGet(CUdevice *device, int ordinal) 返回 ordinal 指定的设备的函数句柄。
+// cuCtxCreate() 是宏定义, cuCtxCreate(CUcontext *pctx, unsigned int flags, CUdevice dev), 创建 a CUDA Context。
+#include <cuda.h>
+#include <iostream>
+
+int main() {
+    CUdevice cuDevice1, cuDevice2;
+    CUcontext cuContext1, cuContext2;
+
+    cuInit(0);
+    cuDeviceGet(&cuDevice1, 0);
+    cuDeviceGet(&cuDevice2, 1);
+
+    cuCtxCreate(&cuContext1, 0, cuDevice1);
+    cuCtxCreate(&cuContext2, 0, cuDevice2);
+
+    // 切换到上下文1
+    cuCtxSetCurrent(cuContext1);
+    // 在设备1上执行操作
+    // ...
+
+    // 切换到上下文2
+    cuCtxSetCurrent(cuContext2);
+    // 在设备2上执行操作
+    // ...
+
+    // 清理资源
+    cuCtxDestroy(cuContext1);
+    cuCtxDestroy(cuContext2);
+
+    return 0;
+}
+
+```
+```C++
+// 想要使用 CUDA Driver API, 必须包含头文件 <cuda.h>,  <cuda_runtime.h> 是运行时 API
+// 显示的上下文管理, 通常用在一个设备上需要多个上下文, 而 CUDA Runtime API 隐式的管理上下文不太满足要求。
+// CUDA Driver API 显示地创建和管理上下文, 提供更细粒度的控制。
+// cuInit(0); 初始化 CUDA Driver API, 必须在其他 CUDA Driver API 调用之前调用, 其中的 flags 参数必须为 0。
+// cuCtxCreate 显示创建 CUDA Context, 注意每个线程是通过 Context stack 来管理的; cuCtxDestroy 销毁上下文, 释放资源。
+#include <cuda.h>
+#include <iostream>
+
+int main() {
+    CUdevice cuDevice;
+    CUcontext cuContext;
+    int deviceCount = 0;
+
+    cuInit(0);
+    cuDeviceGetCount(&deviceCount);
+
+    for (int device = 0; device < deviceCount; ++device) {
+        cuDeviceGet(&cuDevice, device);
+        cuCtxCreate(&cuContext, 0, cuDevice);
+
+        // 使用 Driver API 进行操作，如内存分配、内核加载等
+        // ...
+
+        cuCtxDestroy(cuContext);
+    }
+
+    return 0;
+}
+
+```
 
 ## Byte Transformer [原文](https://zhuanlan.zhihu.com/p/656342974)
 * Byte Transformer 是针对自然语言处理常见的可变长输入, 论文提出了一套优化算法, 在保证正确性的前提下, 成功避免了传统实现中的冗余计算。其实 ByteTransformer 更适合于处理 BERT 这种 encoder-only 的大语言模型。
@@ -1354,7 +1558,7 @@ void online_softmax_cpu(float* input, float* output, const int M, const int N) {
         float s = 0.0f;
         for (int n = 0; n < N; ++n) {
             float bigger = std::max(maxval, x[n]);          // 历史最大值和当前值选个大的
-            s = s * exp(maxval-bigger) + exp(x[n]-bigger);  // 历史最大值是否更迭, 都能用这个公司。假如没有更迭, 前一项就是 s, 更迭的话前一项就会更新, 后一项是没有任何问题的。
+            s = s * exp(maxval-bigger) + exp(x[n]-bigger);  // 历史最大值是否更迭, 都能用这个公式。假如没有更迭, 前一项就是 s, 更迭的话前一项就会更新, 后一项是没有任何问题的。
             maxval = bigger;                                // 始终每一步都取得最大值
         }
 
@@ -1510,7 +1714,7 @@ $$ Softmax(z_{i})=\frac{e^{\frac{z_{i}-\max z}{T}}}{\sum_{j=1}^n{e^{\frac{z_j - 
 import numpy as np
 
 def softmax_with_t(x, T=1):
-    return np.exp(x/T)sum(np.exp(x/T))
+    return np.exp(x/T)/sum(np.exp(x/T))
 
 plt.figure(figsize=(6,3))
 logits = np.asarray([1, 5, 7, 10])
@@ -1575,8 +1779,8 @@ rope_q = torch.view_as_real(rope_q_).flatten(-2)                      # [1, 32, 
 __constant__ float theta[NUM_PAIRS];
 
 // Precomputed cosine and sine values for θ_i * p, 存储 m*theta 的 sin 和 cos 值, 形状是 [seq_len, num_pairs], 先存 seq_len 的所有 num_pair
-__constant__ float cos_theta_p[NUM_PAIRS * SEQ_LEN];
-__constant__ float sin_theta_p[NUM_PAIRS * SEQ_LEN];
+__constant__ float cos_theta_p[SEQ_LEN * NUM_PAIRS];
+__constant__ float sin_theta_p[SEQ_LEN * NUM_PAIRS];
 
 __global__ void RoPE(float *x, int batchSize, int seq_len, int num_head, int head_dim) {
     // Each block processes one (batch_id, seq_id, head_id)
@@ -1665,6 +1869,97 @@ int main() {
     - 缓存机制: 利用常量缓存提升了读取速度, 而 global memory 没有这样的缓存, 且访问延迟更高。
     - 更低的带宽消耗: 由于常量缓存的存在, 其读取效率通常高于 global memory, 其是在访问模式局部性好的情况下, 占用更少的带宽。
     - 常量缓存是一个较为特定的缓存机制，主要提升访问常量数据的效率，而 L1 和 L2 缓存是更通用的缓存，用于加速对全局内存和局部内存的访问。
+
+## LayerNorm
+* LayerNorm 更多的被用于 NLP 领域, 其公式如下:
+$$ LayerNorm(x)=weight*\frac{x-mean(x)}{\sqrt{var(x)+x}} + bias $$
+* 整体的优化思路有以下几点:
+    - 使用每个 warp 处理一行, 一共需要 $B\times C$ 个 warp。
+    - Var(X) 是方差, 方差可以通过 $Var(x)=E(X^2)-E(X)^2$
+    - 因为会多次用到输入数据, 输入数据都是存放在 DARM 中的, 所以可以第一次读取 DARM 的时候就将数据缓存到 SM 中
+    - Var(X) 变形原理如下图所示:
+    ![](./fig/方差推导定义.png)
+* CUDA 代码如下所示:
+```C++
+#include <cuda_runtime.h>
+
+// 输入矩阵的大小为 (B, T, C) = (8, 1024, 768)  B 为 batchSize, T 为 sequence 的长度, C 是 embedding 的维度
+constexpr int B = 8;
+constexpr int T = 1024;
+constexpr int C = 768;
+constexpr int eps = 1e-5;
+constexpr int blockSize = 128;
+
+// 这个没什么心意, 就是注意这里可以进行 unroll
+template <typename T1>
+__device__ T1 warpReduceSum(T1 val) {
+    #pragma unroll
+    for (int offset = warpSize / 2; offset > 0; offset >>= 1) {
+        val += __shfl_xor_sync(0xFFFFFFFF, val, offset);
+    }
+    return val;
+}
+
+// 1. 利用了个公式 Var(X) = E(x^2) - E(X)^2, 这样就能节省一个循环
+// 2. 每个 warp 处理一行
+// 3. 因为 输入数据会被多次用到, 所以利用 shared_memory 来进行缓存输入数据
+__global__ void layernorm_forward_kernel6(float *input, float *out, float *weight,
+                                          float *bias, float eps, int B, int T, int C) {
+    // one warp one row
+    // use smem to store the shift (x - mean) values
+    // use D(X) = E(X^2) - E(X)^2
+    assert((C % warpSize) == 0);
+    extern __shared__ float sharedX[];
+    int warpsPerBlock = blockDim.x / warpSize;           // 每个 block 中的 warp 个数
+    int warpId = threadIdx.x / warpSize;                 // 当前线程的 warp id
+    int laneId = threadIdx.x % warpSize;                 // 当前线程的 lane id
+    int numWarps = gridDim.x * warpsPerBlock;            // grid 的所有 warp 个数
+    float *const xSharedWarp = sharedX + warpId * C;     // 当前 warp 用到的 SM 的起始地址
+
+    for (int row = blockIdx.x * warpsPerBlock + warpId; row < B * T; row += numWarps)
+        if (row < B * T) {
+            // 定位到当前 warp 处理的全局内存的起始地址
+            float *const x = input + row * C;
+            float *const y = out + row * C;
+
+            float partialSum = 0.0f, partialSum2 = 0.0f;
+            for (int i = laneId; i < C; i += warpSize) {
+                float xi = x[i];     // 先从共享内存读取到寄存器中, 这样再从寄存器到其他的寄存器和 SM 就快了
+                xSharedWarp[i] = xi;
+                partialSum += xi;
+                partialSum += xi * xi;
+            }
+
+            float mean = warpReduceSum(partialSum) / C;    // warp 规约求 E(X)
+            float mean2 = warpReduceSum(partialSum2) / C;  // warp 规约求 E(X^2)
+            float var = (mean2 - mean * mean);             // 依据公式求得方差
+            float inv_std = 1.0f / sqrt(var / C + eps);
+
+            // 写到输出中
+            for (int i = laneId; i < C; i += warpSize) {
+                y[i] = weight[i] * (sharedX[i] - mean) * inv_std + bias[i];
+            }
+        }
+}
+
+int main(){
+
+    float *inputGPU = nullptr;
+    float *outputGPU = nullptr;
+    float *weightGPU = nullptr;
+    float *biasGPU = nullptr;
+    cudaMalloc(&inputGPU, B * T * C * sizeof(float));
+    cudaMalloc(&outputGPU, B * T * C * sizeof(float));
+    // weight 和 bias 都是在 C 这个维度展开的
+    cudaMalloc(&weightGPU, C * sizeof(float));
+    cudaMalloc(&biasGPU, C * sizeof(float));
+
+    const int smemSize = blockSize / 32 * C * sizeof(float);  // 每个 warp 处理一个 C, 那就需要 一个block中 warp 个数*C*sizeof(float)
+    layernorm_forward_kernel6<<<B * T * 32 / blockSize, blockSize, smemSize>>>(inputGPU, outputGPU, weightGPU, biasGPU, eps, B, T, C); 
+
+    return 0;
+}
+```
 
 ## 大模型采样策略
 * 在文本生成任务中, 需要让模型逐个预测每个 token, 直到达到终止条件(特殊符号或最大长度)。在每一步的预测中, 模型会给出一个概率分布(softmax), 表示它对下一个单词的预测。如何从这个概率分布中选择下一个单词, 这个就是采样策略。常见的方法有:
@@ -1818,94 +2113,4 @@ def beam_search(model, input_ids, beam_width, max_length, tokenizer):
         generated_sequences.append((text, score))
 
     return generated_sequences
-```
-## LayerNorm
-* LayerNorm 更多的被用于 NLP 领域, 其公式如下:
-$$ LayerNorm(x)=weight*\frac{x-mean(x)}{\sqrt{var(x)+x}} + bias $$
-* 整体的优化思路有以下几点:
-    - 使用每个 warp 处理一行, 一共需要 $B\times C$ 个 warp。
-    - Var(X) 是方差, 方差可以通过 $Var(x)=E(X^2)-E(X)^2$
-    - 因为会多次用到输入数据, 输入数据都是存放在 DARM 中的, 所以可以第一次读取 DARM 的时候就将数据缓存到 SM 中
-    - Var(X) 变形原理如下图所示:
-    ![](./fig/方差推导定义.png)
-* CUDA 代码如下所示:
-```C++
-#include <cuda_runtime.h>
-
-// 输入矩阵的大小为 (B, T, C) = (8, 1024, 768)  B 为 batchSize, T 为 sequence 的长度, C 是 embedding 的维度
-constexpr int B = 8;
-constexpr int T = 1024;
-constexpr int C = 768;
-constexpr int eps = 1e-5;
-constexpr int blockSize = 128;
-
-// 这个没什么心意, 就是注意这里可以进行 unroll
-template <typename T1>
-__device__ T1 warpReduceSum(T1 val) {
-    #pragma unroll
-    for (int offset = warpSize / 2; offset > 0; offset >>= 1) {
-        val += __shfl_xor_sync(0xFFFFFFFF, val, offset);
-    }
-    return val;
-}
-
-// 1. 利用了个公式 Var(X) = E(x^2) - E(X)^2, 这样就能节省一个循环
-// 2. 每个 warp 处理一行
-// 3. 因为 输入数据会被多次用到, 所以利用 shared_memory 来进行缓存输入数据
-__global__ void layernorm_forward_kernel6(float *input, float *out, float *weight,
-                                          float *bias, float eps, int B, int T, int C) {
-    // one warp one row
-    // use smem to store the shift (x - mean) values
-    // use D(X) = E(X^2) - E(X)^2
-    assert((C % warpSize) == 0);
-    extern __shared__ float sharedX[];
-    int warpsPerBlock = blockDim.x / warpSize;           // 每个 block 中的 warp 个数
-    int warpId = threadIdx.x / warpSize;                 // 当前线程的 warp id
-    int laneId = threadIdx.x % warpSize;                 // 当前线程的 lane id
-    int numWarps = gridDim.x * warpsPerBlock;            // grid 的所有 warp 个数
-    float *const xSharedWarp = sharedX + warpId * C;     // 当前 warp 用到的 SM 的起始地址
-
-    for (int row = blockIdx.x * warpsPerBlock + warpId; row < B * T; row += numWarps)
-        if (row < B * T) {
-            // 定位到当前 warp 处理的全局内存的起始地址
-            float *const x = input + row * C;
-            float *const y = out + row * C;
-
-            float partialSum = 0.0f, partialSum2 = 0.0f;
-            for (int i = laneId; i < C; i += warpSize) {
-                float xi = x[i];     // 先从共享内存读取到寄存器中, 这样再从寄存器到其他的寄存器和 SM 就快了
-                xSharedWarp[i] = xi;
-                partialSum += xi;
-                partialSum += xi * xi;
-            }
-
-            float mean = warpReduceSum(partialSum) / C;    // warp 规约求 E(X)
-            float mean2 = warpReduceSum(partialSum2) / C;  // warp 规约求 E(X^2)
-            float var = (mean2 - mean * mean);             // 依据公式求得方差
-            float inv_std = 1.0f / sqrt(var / C + eps);
-
-            // 写到输出中
-            for (int i = laneId; i < C; i += warpSize) {
-                y[i] = weight[i] * (sharedX[i] - mean) * inv_std + bias[i];
-            }
-        }
-}
-
-int main(){
-
-    float *inputGPU = nullptr;
-    float *outputGPU = nullptr;
-    float *weightGPU = nullptr;
-    float *biasGPU = nullptr;
-    cudaMalloc(&inputGPU, B * T * C * sizeof(float));
-    cudaMalloc(&outputGPU, B * T * C * sizeof(float));
-    // weight 和 bias 都是在 C 这个维度展开的
-    cudaMalloc(&weightGPU, C * sizeof(float));
-    cudaMalloc(&biasGPU, C * sizeof(float));
-
-    const int smemSize = blockSize / 32 * C * sizeof(float);  // 每个 warp 处理一个 C, 那就需要 一个block中 warp 个数*C*sizeof(float)
-    layernorm_forward_kernel6<<<B * T * 32 / blockSize, blockSize, smemSize>>>(inputGPU, outputGPU, weightGPU, biasGPU, eps, B, T, C); 
-
-    return 0;
-}
 ```

@@ -44,7 +44,7 @@ __global__ void gemm_kernel(half *A, half *B, float *C, int M_PAD, int K_PAD, in
     }
 
     float *cptr = C + midx * M_TILE * N_PAD + nidx * N_TILE;
-    // 第三个易错点, 当将 abfrag 的结果存储到其他存储器时, 需要指定 mem_row_major
+    // 第四个易错点, 当将 abfrag 的结果存储到其他存储器时, 需要指定 mem_row_major
     wmma::store_matrix_sync(cptr, abfrag, N_PAD, wmma::mem_row_major);  // 修正参数
 }
 
