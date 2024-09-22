@@ -2114,3 +2114,137 @@ def beam_search(model, input_ids, beam_width, max_length, tokenizer):
 
     return generated_sequences
 ```
+## DropOut
+* DropOut 是一种场景的正则化技术, 广泛应用于深度学习模型中, 主要目的是为了防止模型过拟合, 提高模型的泛化能力。DropOut 核心思想是在训练过程中, 随机丢弃一部分神经元的输出。在训练过程中, 按照一定的概率 p 随机将一些神经元的输出设置为 0, 并对未被丢弃的激活值进行缩放(除以 1-p)。在推理过程中, dropOut 不会对输入进行任何的修改。以下是起作用的主要原因:
+    - 减少神经元之间的共适应性: 当某些神经元总是一起工作时，模型可能会依赖特定的神经元组合。
+    - 防止权重过大: DropOut 通过随机失活，迫使模型的权重不能过度依赖某些输入，促进了权重的均衡。
+```Python
+import torch
+import torch.nn as nn
+
+class DropOut(nn.Module):
+    def __init__(self, p=0.5):
+        """
+        自定义的 DropOut 类，用于实现 Dropout 正则化，不使用 torch.bernoulli。
+
+        参数：
+        - p: 进行 dropout 的概率，默认为 0.5。
+        """
+        super(DropOut, self).__init__()
+        if p < 0 or p > 1:
+            raise ValueError("dropout 概率必须在 0 到 1 之间。")
+        self.p = p
+
+    def forward(self, x):
+        if not self.training:
+            # 在评估模式下，不进行 dropout
+            return x
+        else:
+            # 使用 torch.rand_like 生成与 x 形状相同的均匀分布随机数, 这里是均匀分布的随机数
+            random_tensor = torch.rand_like(x)
+            # 生成 mask, 当随机数大于 dropout 概率时，保留对应的神经元
+            mask = (random_tensor > self.p).float()
+            # 对激活值进行缩放, 防止训练和测试时的值偏差
+            return x * mask / (1 - self.p)
+```
+* CUDA 实现其实也是很好实现的, 逐元素的操作, 每个线程处理 4 个元素(四个元素为一组, float4)。还有就是其中的可能不够 4 整除的问题, 可以读入每个元素的时候都进行判断一次, 不符合条件就置为 0。写入的时候也是类似, 只不过先判断是否可以写入, 能写入再写入, 就是注意其中生成随机数的方法。还有就是考虑的完备性, 当处于推理阶段时, 不需要 dropOut, 就是直接的进行 copy; 当处理训练阶段时, 先判断是否是 drop 概率为 1, 是的话直接置为 0, 最后的情况才是依据概率进行 dropOut。
+```C++
+// Dropout kernel function
+__global__ void DropoutKernel(const float* __restrict__ x,
+                              uint8_t* __restrict__ mask,
+                              float* __restrict__ y,
+                              size_t n,
+                              float dropout_prob,
+                              bool is_upscale_in_train,
+                              unsigned int seed) {
+
+    // Calculate global thread ID
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;  // 计算线程的 id
+    int stride = gridDim.x * blockDim.x;              // 所有线程的总数
+
+    // Initialize the random number generator state
+    curandStatePhilox4_32_10_t state;
+    curand_init(seed, idx, 0, &state);
+
+    float inv_prob = 1.0f / (1.0f - dropout_prob);  // 提前计算出来
+
+    // Loop over the elements, processing four elements per thread for efficiency
+    for (size_t i = idx * 4; i < n; i += stride * 4) {
+        // Generate 4 random numbers
+        float4 rand = curand_uniform4(&state);  // 一次得到 float4 的随机数
+
+        // Load 4 input values, 因为输入不一定是 4 的整数倍, 所以可以直接展开, 超的直接置为 0 就可以了
+        float4 x_val;
+        x_val.x = (i + 0 < n) ? x[i + 0] : 0.0f;
+        x_val.y = (i + 1 < n) ? x[i + 1] : 0.0f;
+        x_val.z = (i + 2 < n) ? x[i + 2] : 0.0f;
+        x_val.w = (i + 3 < n) ? x[i + 3] : 0.0f;
+
+        // Initialize output values and masks, 保存输出值和mask
+        float4 y_val;
+        uint8_t m_val[4];
+
+        // Apply dropout, 小于 dropout 概率, 都置为 0, 还需要依据 is_upscale_in_train 来判断是否需要缩放
+        y_val.x = (rand.x >= dropout_prob) ? (is_upscale_in_train ? x_val.x * inv_prob : x_val.x) : 0.0f;
+        y_val.y = (rand.y >= dropout_prob) ? (is_upscale_in_train ? x_val.y * inv_prob : x_val.y) : 0.0f;
+        y_val.z = (rand.z >= dropout_prob) ? (is_upscale_in_train ? x_val.z * inv_prob : x_val.z) : 0.0f;
+        y_val.w = (rand.w >= dropout_prob) ? (is_upscale_in_train ? x_val.w * inv_prob : x_val.w) : 0.0f;
+
+        // Set mask values, 存储 mask
+        m_val[0] = (rand.x >= dropout_prob);
+        m_val[1] = (rand.y >= dropout_prob);
+        m_val[2] = (rand.z >= dropout_prob);
+        m_val[3] = (rand.w >= dropout_prob);
+
+        // Store the results back to global memory, 展开着写回, 防止超越边界
+        if (i + 0 < n) {
+            y[i + 0] = y_val.x;
+            mask[i + 0] = m_val[0];
+        }
+        if (i + 1 < n) {
+            y[i + 1] = y_val.y;
+            mask[i + 1] = m_val[1];
+        }
+        if (i + 2 < n) {
+            y[i + 2] = y_val.z;
+            mask[i + 2] = m_val[2];
+        }
+        if (i + 3 < n) {
+            y[i + 3] = y_val.w;
+            mask[i + 3] = m_val[3];
+        }
+    }
+}
+```
+* CUDA 中生成随机数都依赖于库函数 `<curand_kernel.h>`, cuRAND 提供了几种不同的随机数生成器类型, 每种都有其不同的特性和使用场景。
+    - curandStatePhilox4_32_10_t: 高效且推荐用于高性能的随机数生成。
+    - curandStateXORWOW_t: 经典的 XORWOW 生成器，性能较好，适合一般的随机数生成。
+    - curandStateMRG32k3a_t: 多重递归生成器，适合高精度随机数的生成。
+    - curandStateMTGP32_t: 基于 Mersenne Twister 算法，适合大规模生成随机数，但其初始化开销较大。
+* 使用的步骤是:
+    - 初始化随机数生成器状态: 在内核中使用 `curand_init()` 函数初始化状态, 确保每个线程生成不同的随机数序列。
+    - 根据生成器类型调用不同的 curand_* 函数生成随机数，支持生成浮点数、整型数等多种数据类型。
+```C++
+// curand_init(seed, thread_id, offset, &state) 是 cuRAND 中用于初始化随机数生成器状态的函数, 它为每个线程生成独立的随机数序列。
+// seed: 用于初始化随机数生成器的种子，它决定了生成的随机数序列的起点。相同的种子会生成相同的随机数序列
+// thread_id: 是用于区分不同线程的标识符，它确保每个线程生成不同的随机数序列。通常将 thread_id 设为每个线程的唯一标识符（如 threadIdx.x + blockIdx.x * blockDim.x），确保每个线程拥有独立的随机数生成器状态，从而生成不同的随机数。
+// offset: 用于偏移随机数序列的起点，它决定了每个线程从随机数序列中的哪个位置开始生成随机数。用于在同一个线程中跳过随机数序列的前几个数。通常可以设置为 0。
+// state: state 是一个指向 curandState 类型的指针，表示线程的随机数生成器状态。
+
+// Calculate global thread ID
+int idx = blockIdx.x * blockDim.x + threadIdx.x;  // 计算线程的 id
+int stride = gridDim.x * blockDim.x;              // 所有线程的总数
+
+// Initialize the random number generator state
+curandStatePhilox4_32_10_t state;
+curand_init(seed, idx, 0, &state);
+float rand = curand_uniform(&state);    // 生成 0-1 之间的均匀分布
+float4 rand = curand_uniform4(&state);  // 生成四个
+```
+
+## Kernel 中使用自定义的类
+* CUDA 设备代码的执行环境和普通的 CPU 不同, CUDA kernel 中使用 C++ 类时, 以下要注意:
+    - 类的所有成员变量都必须位于设备内存中。因此要避免使用 `new` 和 `malloc`; 不支持大部分 C++ 标准库(std::vector, std::map, std::string); 
+    - 类的所有方法都必须在设备上(包括构造和析构), 即要包含 `__device__` 的标识。
+    - 避免使用虚函数(不支持动态的多态), 支持普通的继承, 支持静态的多态(模板, 函数重载)。
+    - 可以将类对象以值传递和指针传递的方式做为 CUDA Kernel 的参数。
