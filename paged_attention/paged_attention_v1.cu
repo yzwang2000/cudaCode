@@ -13,7 +13,7 @@ constexpr int64_t num_blocks = (max_seq_len / block_size) * 5; // 提前分配�
 class CacheManager {
 public:
     CacheManager(int64_t batch_size) : batch_size(batch_size) {
-        // 缓存 k 和 v 用的, 是实际内存空间, 每个 block 中存放的是 block_size * n_kv_heads * head_dim 个数, 这个其是个显存池
+        // 缓存 k 和 v 用的, 是实际内存空间, 每个 block 中存放的是 block_size * n_kv_heads * head_dim 个数, 这个其实是个显存池
         k_cache_paged = torch::randn({num_blocks, block_size, n_kv_heads, head_dim}, torch::dtype(torch::kBFloat16).device(torch::kCUDA));
         v_cache_paged = torch::randn({num_blocks, block_size, n_kv_heads, head_dim}, torch::dtype(torch::kBFloat16).device(torch::kCUDA));
 

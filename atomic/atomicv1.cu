@@ -2,7 +2,7 @@
 #include <cuda_runtime.h>
 #include <vector>
 
-__device__ __inline__ int float_atomic_add(float *dst, float src) {
+__device__ __inline__ int float_atomic_add(float *dst, float src){
     int old = __float_as_int(*dst), expect;  // 因为 atomicCAS 只能实现 int 的比较与写入
     do {
         expect = old;

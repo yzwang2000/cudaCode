@@ -979,7 +979,7 @@ std::vector<unsigned int> quickSort(std::vector<unsigned int>&nums, int start, i
 ```
 
 ## 堆排序
-* 堆排序(Heap Sort) 是一种基于堆数据结果的比较排序算法, 具有比较好的时间复杂度和空间复杂度。堆是一种完全二叉树(在完全二叉树中，除了最底层节点可能没填满外，其余每层节点数都达到最大值，并且最下面一层的节点都集中在该层最左边的若干位置)。
+* 堆排序(Heap Sort) 是一种基于堆数据结构的比较排序算法, 具有比较好的时间复杂度和空间复杂度。堆是一种完全二叉树(在完全二叉树中，除了最底层节点可能没填满外，其余每层节点数都达到最大值，并且最下面一层的节点都集中在该层最左边的若干位置)。
 * 堆排序的基本思路:
     - 建立堆(分为最大堆和最小堆)。首先将无序数组调整为最大堆, 时间复杂度 `O(n)`。
     - 交换堆顶与堆尾元素。将最大值与数组的最后一个元素交换位置, 将剩余元素调整为新的最大堆。`O(nlog(n))`
@@ -1042,7 +1042,7 @@ void HeapSort(std::vector<int>& nums)
 		std::swap(nums[0], nums[i]);  // 将堆中最后一个元素与第一个元素进行交换
 		HeapAdjust(nums, i, 0);       // 对堆中的第一个元素进行调整
 	}
-	// 由于堆排序的是一种原地排序算法, 不需要额外的存储空间, 空间复杂度为 O(1)。
+	// 由于有栈空间的支出。所以最好和平均的空间复杂度均为 O(log2(n)), 最坏为 O(n)[当元素均为逆序的时候, 每次划分的都不均衡]
 }
 
 int main()
@@ -1505,14 +1505,14 @@ thread_block_tile<4>  tile4  = tiled_partition<4> (this_thread_block());
 // .shfl()  .shfl_down()  .shfl_up()  .shfl_xor()
 
 ```
-## Atomic Functions (原子操作) [https://zhuanlan.zhihu.com/p/578195193]
+## Atomic Functions (原子操作) [原文](https://zhuanlan.zhihu.com/p/578195193)
 * 原子操作对驻留在`全局内存或共享内存`中的一个 32 位或者 64 位单词执行 `读-修改-写原子操作`。例如, `atomicAdd()` 在全局或共享内存中的某个地址读取一个单词，向其中添加一个数字，然后将结果写回相同的地址。原子函数只能在`设备函数`中使用。
 * 原子操作有 算数运算函数 和 按位操作函数。
     - 算数运算函数: `atomicAdd()`, `atomicSub()`, `atomicMin()`, `atomicMax()`
     - 按位操作函数: `atomicAnd()`, `atomicOr()`, `atomicXor()`
     - 交换函数: `atomicExch()`, `atomicCAS()`
 * 其中的 `atomicExch(int* address, int val)` 是从第一个参数 address 指针指向的内存地址(可以是全局内存或共享内存)中读取32位或64位数据(记做旧值 old), 然后将 val 值写入到 address 地址处, 并返回未做交换前的旧值 old。这三个操作仍然在一个原子事务中执行。
-* 其中的 `atomicCAS(int* address, int compare, int val)` 是从第一个参数 address 指针指向的内存地址(可以是全局内存或共享内存)中读取32位或64位数据(记做旧值 old), 比较 old 值是否与 compare 相等, 相等的话, 将 val 写入到 address 地址处, 不相等的话, 就不改变 address 处的值。任何原子操作都可以基于 automicCAS() 实现。
+* 其中的 `atomicCAS(int* address, int compare, int val)` 是从第一个参数 address 指针指向的内存地址(可以是全局内存或共享内存)中读取32位或64位数据(记做旧值 old), 比较 old 值是否与 compare 相等, 相等的话, 将 val 写入到 address 地址处, 不相等的话, 就不改变 address 处的值。任何原子操作都可以基于 atomicCAS() 实现。
 
 ## Online Softmax 实现
 * softmax 是一种激活函数, 可以将一个数值向量归一化为一个概率分布向量。将 $(-\infty, \infty)$ 范围内的数值映射为一个 $(0,1)$ 区间的数值, 公式如下
@@ -1872,7 +1872,7 @@ int main() {
 
 ## LayerNorm
 * LayerNorm 更多的被用于 NLP 领域, 其公式如下:
-$$ LayerNorm(x)=weight*\frac{x-mean(x)}{\sqrt{var(x)+x}} + bias $$
+$$ LayerNorm(x)=weight*\frac{x-mean(x)}{\sqrt{var(x)+eps}} + bias $$
 * 整体的优化思路有以下几点:
     - 使用每个 warp 处理一行, 一共需要 $B\times C$ 个 warp。
     - Var(X) 是方差, 方差可以通过 $Var(x)=E(X^2)-E(X)^2$
@@ -2115,7 +2115,7 @@ def beam_search(model, input_ids, beam_width, max_length, tokenizer):
     return generated_sequences
 ```
 ## DropOut
-* DropOut 是一种场景的正则化技术, 广泛应用于深度学习模型中, 主要目的是为了防止模型过拟合, 提高模型的泛化能力。DropOut 核心思想是在训练过程中, 随机丢弃一部分神经元的输出。在训练过程中, 按照一定的概率 p 随机将一些神经元的输出设置为 0, 并对未被丢弃的激活值进行缩放(除以 1-p)。在推理过程中, dropOut 不会对输入进行任何的修改。以下是起作用的主要原因:
+* DropOut 是一种常见的正则化技术, 广泛应用于深度学习模型中, 主要目的是为了防止模型过拟合, 提高模型的泛化能力。DropOut 核心思想是在训练过程中, 随机丢弃一部分神经元的输出。在训练过程中, 按照一定的概率 `p` 随机将一些神经元的输出设置为 0, 并对未被丢弃的激活值进行缩放(除以 1-p)。在推理过程中, dropOut 不会对输入进行任何的修改。以下是起作用的主要原因:
     - 减少神经元之间的共适应性: 当某些神经元总是一起工作时，模型可能会依赖特定的神经元组合。
     - 防止权重过大: DropOut 通过随机失活，迫使模型的权重不能过度依赖某些输入，促进了权重的均衡。
 ```Python
@@ -2248,3 +2248,63 @@ float4 rand = curand_uniform4(&state);  // 生成四个
     - 类的所有方法都必须在设备上(包括构造和析构), 即要包含 `__device__` 的标识。
     - 避免使用虚函数(不支持动态的多态), 支持普通的继承, 支持静态的多态(模板, 函数重载)。
     - 可以将类对象以值传递和指针传递的方式做为 CUDA Kernel 的参数。
+
+## NVIDIA GPU 的发展架构
+* NVIDIA 在 1999 年发明了 GPU, 到如今为止, NVIDIA GPU 架构已经从 2010 年的 `Fermi 架构` 到 2024 年的 `Blackwell 架构`, 经历了共 9 代的架构。架构图如下所示(其实从 2010 至 2024 年都是每两年发布新一代的架构, 只有 2017 特殊又单独发布了一代, `8+1=9`):
+![](./fig/NVIDIA_GPU架构.png)
+* 接下来将介绍几个重点的架构:
+    * `Fermi`(费米, 2010): 首个完整的 GPU 计算架构, 整个 GPU 有 4 个 GPC, 然后一个 GPC 有 4 个 SM 和 1 个光栅引擎(Raster Engine), 此时也是第一次出现 CUDA Core 的概念(以前称为 SP)。
+    ![](./fig/Fermi架构.png)
+    * 每个 SM 中有 32 个 CUDA Core 和 32 个 LD/ST Unit。注意 CUDA Core 中包含了 FP Unit 和 INT Unit, 分别用来计算浮点数和整数, 但是一个 CUDA Core 同时只能执行其中的一种操作。
+    ![](./fig/Fermi_SM架构.png)
+    * `Pascal`(帕斯卡, 2016, 1080Ti): 第一款面向 AI 的架构, 第一代的 NVLink(用于单卡内多个 GPU 内点到点通信), 第一次支持 FP16 半精度计算。此时整个 GPU 由多个 GPC 组成, 每个 GPC 又由多个 TPC 组成, 一个 TPC 中包含两个 SM。
+    ![](./fig/Pascal架构.png)
+    * 注意每个 SM 中有 64 个 CUDA Core(有处理 FP16 的能力), 有 32 个 DP Unit(用于处理 FP64 计算的)。
+    ![](./fig/Pascal_SM架构.png)
+    * `Volta`(伏特, 2017, V100): NVLink2.0, 第一次提出 TensorCore(TensorCore 1.0), 用于加速矩阵乘法计算。将 CUDA Core 拆分(其实从这以后, CUDA Core 就消失了), 分离 FPU 和 ALU(因为原来一直有一个 CUDA Core 内只能执行一种操作的限制)。改进 SIMT 架构, 使得每个线程都有独立的 PC(Program Counter) 和 stack(被一些人诟病其行为是忘记了SIMT的祖训)。
+    ![](./fig/Volta架构.png)
+    * 注意, 包含 64 个 FP32 Core, 64 个 INT32 Core, 32 个 FP64 Core, 8 个 TensorCore, 32 个 LD/ST Unit, 4 个 SFU。因为是独立的, 所以此时, FP32, INT32, FP64, TensorCore 运算都可以同时执行。
+    ![](./fig/Volta_SM架构.png)
+    * `Ampere`(安培, 2020, A100): 引入了 TF32, BF16 的支持, TensorCore 3.0, RT Core 2.0, 第一次使得 TensorCore 支持一个 2:4 的结构化稀疏矩阵与另一个稠密矩阵直接相乘(其实在剪枝的时候, 就会将一些矩阵中的元素置为 0, 然后矩阵就能变得很稀疏, 那么就能够加快推理速度)。
+    ![](./fig/Ampere架构.png)
+    ![](./fig/TensorCore支持稀疏矩阵乘法.png)
+* 认识下 SM 中各个结构的功能:
+    - 经常说的 L1 Cache 与 Shared Memory 是共享内存的, 其实值的是 L1 Data Cache(L1 Cache 由 L1 Data Cache 和 L1 Instruction Cache 两部分组成)
+    - 其中的 warp Scheduler(warp 调度器) 与 Dispatch Unit(指派单元) 是用于管理和调度并行线程执行的关键组件。
+        * warp scheduler: 一个 SM 通常配备有多个调度器, 每个调度器负责在一个时钟周期内选择一个或者多个 warp。warp sceduler 依据当前执行状态, 数据依赖性, 资源可用性选择当前可以执行的 warp。如果一个 Warp 正在等待数据，例如因为内存访问延迟，Warp Scheduler 会将其他准备好执行的 Warp 进行调度，从而隐藏延迟。
+        * Dispatch Unit: 将已被 warp scheduler 选中的 warp 发送到相应的执行单元(其实就是 FP32 Core, INT32 Core 这些组件)。一旦 Warp Scheduler 选择了要执行的 Warp, Dispatch Unit 会根据指令的类型将其派发到相应的硬件资源中。例如, 整数计算会派发到整数执行单元, 浮点计算则派发到浮点执行单元。
+        ![](./fig/Volta_SM架构.png)
+        * 通俗的理解这两个的作用, 如下图所示。假如有 n 个线程等待处理, 在一个时钟周期中会有 3 个 warp 加载到 warp scheduler(一个时钟周期, 一个 warp shceduler 可以同时加载 一个 warp (32 个线程)的指令)。一个 warp scheduler 只有一个 dispatch, 而这个任务发射器连接到了 4 个 FPU, 所以这个 32 个浮点数的计算就需要 8 个时钟周期才可以计算完成。其实这样也就理解了为什么 GPU 图中是那样画的, SM 中又分成了 4 份, 而且为什么一份中的 Core 的个数都是 32 的整数倍。
+        ![](./fig/scheduler_Dispatch.png)
+    - CUDA 中每个 SM warp 的利用率从硬件的角度来解释。假设一个 warp scheduler 最多可以管理 8 个 warp, 一个 SM 上有 4 个 warp scheduler, 所以一个 SM 上最大的活跃 warp 个数为 `4*8=32`。active warp 还能再被分成 `stalled`, `eligible`, `selected`。对于一个warp scheduler(指令发射器)，每个时钟周期可以发射出一个指令（因为只有一个 issue slot, 只能有一个黄色的）。
+        ![](./fig/warp调度状态.png)
+        - 其中红色的是处于 `stalled`(阻塞), 黄色的是 `selected`(当下被发射的), 绿色的是 `eligible`(可以被发射的)。4 个 时钟周期, 只有 `5+5+4+6=20` 个 active warp, 所以 warp 利用率为 `20/(4*8)=62.5%`。发射槽的利用率为 `3/4=75%`。
+
+## TensorCore 的发展历程
+* 混合精度是指在底层硬件算子层面, 使用 FP16 做为输入和输出训练, 使用全精度(FP32) 进行中间结果计算而不损失过多精度的技术。
+* Volta 的第一代 TensorCore(4*4*4): 
+    - 每个 TensorCore 每个时钟周期能够执行 `4*4*4` GEMM, 64 个 FMA, 执行计算 `D=A*B+C`, 其中 A, B, C, D 均是 `4*4` 的矩阵。A 和 B 是 FP16 矩阵, 累加矩阵 C 和 D 是 FP16 或 FP32 矩阵。其中每个 SM 上有 8 个 TensorCore, 那么一个时钟周期就能够执行 512 个浮点计算。其实对应到这一代 SM 架构的话, 每个 SM 分成了 4 个区域, 每个区域每个时钟周期能够执行 16 个 FMA, 也就是 32 个浮点计算。一个 SM 非 TensorCore 部分, 每个时钟周期最多能够执行 128 次浮点计算。
+    ![](./fig/TensorCore1.0_Volta.png)
+    - CUDA 将 Tensor Core 以 Warp Level 的操作提供了 `CUDA C++ WMMA API` 对外提供, 一个 warp 可以同时操作多个 TensorCore, 来提供 `16*16*16` 的矩阵计算。
+    - 每个 Sub-Core 包含 TensorCore + FP64 + +FP32 + INT8 + 特殊函数处理单元 SFU。其中Warp Scheduler 向 Tensor Core 发送矩阵乘法GEMM(不再经过 Dispatch Unit 模块)运算指令。
+    ![](./fig/volta_SM微架构.png)
+    ![](./fig/volta_subCore微架构.png)
+* Turing 的第二代 TensorCore(8*8*4):
+    - 增加了 INT8 和 INT4 类型支持, 多了 FP16 fast path;
+    - FP16 fast path: 在第一代 Tensor Core（如 Volta 架构）中，Tensor Core 支持 FP16 的矩阵乘法和累加操作，但其结果会使用 FP32（32 位浮点数）存储和累加。第二代 Tensor Core（如 Ampere 架构）进一步改进了这一点，增加了专门的 FP16 fast path，使得某些操作（如矩阵乘法和累加操作）在 FP16 精度下可以直接执行，不需要中间转换为 FP32。
+    ![](./fig/turing_subCore微架构.png)
+* Ampere 的第三代 TensorCore(16*16*16):
+    - 提供异步拷贝机制(软件层的异步拷贝机制); 前两代的 TensorCore, 数据的流通是 `DRAM->L2->L1->RF->SMEM->RF`(必须先把数据加载到寄存器, 然后再写入共享内存中)。Ampere 架构提供了异步的内存拷贝机制, 实现全局内存不经过寄存器直接到共享内存的数据加载。
+    - 在 Volta 架构的 TensorCore 中, 将一个 warp 分成若干个组(每 8 个为一组, 彼此共享数据); Ampere 架构中一个 warp 不再分组, 整个 warp 中 32 个线程都可以共享数据。Ampere 架构的 Tensor Core 允许一个 warp 内的所有 32 个线程更自由、广泛地交换和共享数据, 从而在矩阵计算中实现更高的并行度和效率, 减少了线程间通信和数据传递的开销。
+    - 引入 TF32, BF16 的支持。
+    ![](./fig/第三代TensorCore数据流动形式.png)
+* Hopper 的第四代 TensorCore(16*16*16):
+    - 引入了 TMA(Tensor Memory Accelerator): 硬件的异步加载器, 全局内存中的数据可以被异步的加载到共享内存中。
+    ![](./fig/hopper_SM架构.png)
+    - 引入了 GPC 内部交叉通信互联网络, GPC 内的 SM 可以高效地访问彼此的共享内存, 因此 CUDA 中也引入了 `thread block Cluster` 的概念。
+    ![](./fig/hopper_SM_to_SM.png)
+    - 引入 FP8 的支持。
+* 历代 TensorCore 的主要提升点:
+    - memory improvemnt 提高内存读写效率, 使用更高效的读写方式
+    - 提供更多的执行格式(最开始是 4*4*4 GEMM)
+    - 提供更多的 CUDA 编程模式(输入输出类型支持更多, CUDA C wmma, ptx)
