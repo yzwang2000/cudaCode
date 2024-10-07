@@ -1403,18 +1403,33 @@ int main() {
 * 利用 im2col + gemm 实现卷积计算的缺点:
     - 内存消耗大。将数据展开为一个更大的矩阵, 显著增加内存使用。
     - `im2col` 本身也是一个访存密集型的操作, 也是有比较大的访存开销。
+* 其实可以利用分治的思想来对 `im2Col + GEMM` 算法进行优化。如下图所示, 其实是将输入特征图 $IC\times IH\times IW$ 按照行分成多个组, 那么每个组能够产生 $(FH\times FW\times IC)\times blockSize$ (这里的 blockSize 其实是将 $OH\times OW$ 进行分组, 得到的每组的大小)大小的输入数据, 然后与权重矩阵进行矩阵乘法, 得到最终的部分结果, 等待其他结果然后拼接在一起。这种方法其实是优化了访存, 因为原始的方法处理的数据太多, 缓存可能放不下。
 
 ## Winograd 卷积计算方法 [原文](https://zhuanlan.zhihu.com/p/524344248)
 * Winograd 的核心思想是将卷积操作分解成一系列小矩阵的乘法, 通过矩阵变换和逆变换, 将卷积操作优化为`更少的乘法和更多的加法`操作。
 * Winograd 将卷积操作分解为 3 个步骤, 输入变换、权重变换、输出变换。
-    - 输入变换: 使用预定义的变换矩阵 B, 将输入特征图的块 d 进行变换，得到变换后的输入矩阵 `V`。其实这个变换是将输入数据转换到另一个空间中。$V=B^T \cdot d \cdot B$。
+    - 输入变换: 使用预定义的变换矩阵 B, 将输入特征图的块 d 进行变换, 得到变换后的输入矩阵 `V`。其实这个变换是将输入数据转换到另一个空间中, $V=B^T \cdot d \cdot B$。
     - 权重变换: 对卷积核 g 进行类似的变化。使用另一个预定义的变换矩阵 `G` 对卷积核进行变换, 得到变换后的卷积核为 `U`。$U=G\cdot g \cdot G^T$。
-    - 变换后的输入块 U 和卷积核块 V, 在 Winograd 域中进行逐元素的相乘得到 `M`。$M=V \cdot U$。
+    - 变换后的输入块 U 和卷积核块 V, 在 Winograd 域中进行逐元素的相乘得到 `M`。$M=V \odot U$。
     - 输出变换, 在用一个预定义矩阵 A进行逆变换, 回到原来的空间, 得到最终的卷积输出 `Y`。$Y=A^T \cdot M \cdot A$。
     - 对所有小块的结果进行合并, 得到最终的卷积输出特征图。
     - 整个过程的公式为 $Y=A^T[(GgG^T)\odot (B^TdB)]A = A^T[U\odot V]A$。
-* 要是单纯的套这个公式, 其实计算复杂度是增加的。但是 A, B, G, g 都是已知的, 只有 d 是每次不一样的。所以 `GgG^T` 可以提前计算出来, d 虽然不知道其元素是什么, 但是可以把其公式代入进去, 避免了乘法的操作(因为 B 中的元素是由 0, 1, -1 组成的)。
-* Winograd 的卷积算法的形式通常表示为 `F(m*m, n*n)`, 其中 `m` 是输出块的大小(如2*2), `n` 是卷积核的大小(如 3*3)。对于任意卷积核大小为 `n*n`, 变换矩阵 `B`, `G`, `A` 是基于多项式插值的方法生成的。变换矩阵的内容可以通过特定的数学公式推导得到, 并且随着 `m` 和 `n` 的变化而不同。
+* 接下来都以卷积核大小为 $3\times 3$, stride 为 1 的卷积操作来举例, 即 F($2\times 2$, $3\times 3$)。其中 $2\times 2$ 也就是输出尺寸, 代表卷积过程中生成的输出块的尺寸。$3\times 3$ 表示卷积核(滤波器)的尺寸。其实能够推导出来, 输入的尺寸为 $n=m+r-1=2+2-1=4, 4\times 4$。
+    - 那么此时 G 的大小为 $4\times 3$, 所以 $GgG^T$ 的大小为 $4\times 4$。B 的大小为 $4\times 4$, 所以 $B^TdB$ 的大小为 $4\times 4$。A 的大小为 $4\times 2$, 所以最终 Y 的大小为 $2\times 2$。
+    - 其实整个的流程是实现输入矩阵尺寸是 $4\times 4$, 卷积核尺寸是 $3\times 3$, 最终的输出矩阵尺寸是 $2\times 2$。直接计算是需要 36 次乘法和 32 次加法。如果是直接套用那个公式, 其实计算量变得很大了。比如 `Gg` 是 `(4*3)@(3*3)` 这就需要 `4*3*3=36` 次乘法, `4*3*3-4*3=24` 次加法。其实计算量变大了很大。
+    - 优化的手段, 第一点, $GgG^T$ 是可以直接提前计算出来的, 不需要运行时计算。第二点, 因为 B 和 B^T 中元素均为 `0` 和 `+-1`, `B^TdB` 是通过固定写死加法, 这使得原本需要的 64 次乘法可以全部省掉。第三点, `因为 A 和 A^T 中元素均为 `0` 和 `+-1`, `A^T[U\odot V]A` 外层的乘法可以全部省掉。这样一操作, 乘法只剩下内层的 $U\odot V$ 一共 16 次乘法(因为是 $4\times 4$ 逐元素乘以 $4\times 4$)。还有 92 次加法。
+    - 以上是分析了对于单个通道的小的输入矩阵的卷积操作过程, 接下来分析下对于正常的多个特征通道的输入特征图的卷积流程: [原文](https://mp.weixin.qq.com/s/-bXUUyUyzULIUWmxLyaosA)
+        - 把输入的 feature map 和 weight 进行 `Winograd` 转换;
+        - 把转换后的 feature map 和 weight 做批量 matmul;
+        - 把矩阵乘的结果进行输出转换, 得到最终结果。
+    ![](./fig/winograd流程图.png)
+    - 详细的框图如下图所示:
+        - 上半部分是 weights 的转换。对卷积核中每个 $3\times 3$ 大小的矩阵都左乘 $G, 4\times 3$, 右乘 $G^T, 3\times 4$, 这操作就使得卷积核中的每个矩阵的大小变为 $4\times 4$, 此时卷积核的大小为 $OC\times IC \times 4\times 4$。然后进行一次 relayout, 将卷积核大小变成 $4\times 4\times OC \times IC$。
+        - 下半部分是 输入 FeatureMap 的转换。首先将输入 FeatureMap 进行按照 $4\times 4$ 大小的 tile 进行切分, 然后每个 tile 通过 B 和 B^T 转换为 $4\times 4$ 的矩阵。此时输入矩阵的形状被切分为 $NTiles\times IC \times 4\times 4$。然后进行一次 relayout, 将输入特征图变成 $4\times 4\times IC \times NTiles$。
+        - 此时权重大小为 $4\times 4\times OC \times IC$, 输入特征图大小为 $4\times 4\times IC \times NTiles$, 进行后两个维度的矩阵乘法计算, 得到最终的输出结果为 $4\times 4\times OC \times NTiles$。再使用 `A^T` 和 `A` 来进行计算, 将此时的输出结果变换为 $2\times 2\times OC \times NTiles$, 然后写入最终的结果变成 $OC\times OH \times OW$。
+        - 优化的策略有几点: 对于权重部分的转换, 其实在模型运行之前转换就可以了。对于下半部分的转换, B^TdB 的部分其实可以把所有的乘法全都省了。对于最后的 A^T 和 A 的部分也可以把所有的乘法全部省了。其实这样一算的话, 是真的把节省了大概一半的乘法运算。
+    ![](./fig/winograd详细操作.png)
+* Winograd 的卷积算法的形式通常表示为 `F(m*m, n*n)`, 其中 `m` 是输出块的大小(如$2\times2$), `n` 是卷积核的大小(如 $3\times 3$)。对于任意卷积核大小为 `n*n`, 变换矩阵 `B`, `G`, `A` 是基于多项式插值的方法生成的。变换矩阵的内容可以通过特定的数学公式推导得到, 并且随着 `m` 和 `n` 的变化而不同。
 * 优点:
     - 减少乘法次数, 提高计算效率。通过变换输入和权重, 将原本复杂的卷积计算转化为更少的矩阵乘法和更多的加法。
     - 适用于小卷积核, 在小卷积核 `3*3` 和 `5*5` 上的计算最为高效, 适合常见的 CNN 模型（例如 ResNet、VGG 等）中广泛使用的小尺寸卷积核。
@@ -2250,7 +2265,7 @@ float4 rand = curand_uniform4(&state);  // 生成四个
     - 可以将类对象以值传递和指针传递的方式做为 CUDA Kernel 的参数。
 
 ## NVIDIA GPU 的发展架构
-* NVIDIA 在 1999 年发明了 GPU, 到如今为止, NVIDIA GPU 架构已经从 2010 年的 `Fermi 架构` 到 2024 年的 `Blackwell 架构`, 经历了共 9 代的架构。架构图如下所示(其实从 2010 至 2024 年都是每两年发布新一代的架构, 只有 2017 特殊又单独发布了一代, `8+1=9`):
+* NVIDIA 在 1999 年发明了 GPU, 到如今为止, NVIDIA GPU 架构已经从 2010 年的 `Fermi 架构` 到 2024 年的 `Blackwell 架构`, 经历了共 9 代的架构。架构图如下所示(其实从 2010 至 2024 年都是每两年发布新一代的架构, 只有 2017 年特殊又单独发布了一代, `8+1=9`):
 ![](./fig/NVIDIA_GPU架构.png)
 * 接下来将介绍几个重点的架构:
     * `Fermi`(费米, 2010): 首个完整的 GPU 计算架构, 整个 GPU 有 4 个 GPC, 然后一个 GPC 有 4 个 SM 和 1 个光栅引擎(Raster Engine), 此时也是第一次出现 CUDA Core 的概念(以前称为 SP)。
@@ -2261,7 +2276,7 @@ float4 rand = curand_uniform4(&state);  // 生成四个
     ![](./fig/Pascal架构.png)
     * 注意每个 SM 中有 64 个 CUDA Core(有处理 FP16 的能力), 有 32 个 DP Unit(用于处理 FP64 计算的)。
     ![](./fig/Pascal_SM架构.png)
-    * `Volta`(伏特, 2017, V100): NVLink2.0, 第一次提出 TensorCore(TensorCore 1.0), 用于加速矩阵乘法计算。将 CUDA Core 拆分(其实从这以后, CUDA Core 就消失了), 分离 FPU 和 ALU(因为原来一直有一个 CUDA Core 内只能执行一种操作的限制)。改进 SIMT 架构, 使得每个线程都有独立的 PC(Program Counter) 和 stack(被一些人诟病其行为是忘记了SIMT的祖训)。
+    * `Volta`(伏特, 2017, V100): NVLink2.0, 第一次提出 TensorCore(TensorCore 1.0), 用于加速矩阵乘法计算。将 CUDA Core 拆分(其实从这以后, CUDA Core 就消失了), 分离 FPU 和 ALU(因为原来一直有一个 CUDA Core 内只能执行一种操作的限制)。改进 SIMT 架构, 使得每个线程都有独立的 PC(Program Counter) 和 stack(被一些人诟病其行为是忘记了 `SIMT` 的祖训)。
     ![](./fig/Volta架构.png)
     * 注意, 包含 64 个 FP32 Core, 64 个 INT32 Core, 32 个 FP64 Core, 8 个 TensorCore, 32 个 LD/ST Unit, 4 个 SFU。因为是独立的, 所以此时, FP32, INT32, FP64, TensorCore 运算都可以同时执行。
     ![](./fig/Volta_SM架构.png)
@@ -2282,23 +2297,23 @@ float4 rand = curand_uniform4(&state);  // 生成四个
 
 ## TensorCore 的发展历程
 * 混合精度是指在底层硬件算子层面, 使用 FP16 做为输入和输出训练, 使用全精度(FP32) 进行中间结果计算而不损失过多精度的技术。
-* Volta 的第一代 TensorCore(4*4*4): 
+* Volta 的第一代 TensorCore($4\times 4\times 4$): 
     - 每个 TensorCore 每个时钟周期能够执行 `4*4*4` GEMM, 64 个 FMA, 执行计算 `D=A*B+C`, 其中 A, B, C, D 均是 `4*4` 的矩阵。A 和 B 是 FP16 矩阵, 累加矩阵 C 和 D 是 FP16 或 FP32 矩阵。其中每个 SM 上有 8 个 TensorCore, 那么一个时钟周期就能够执行 512 个浮点计算。其实对应到这一代 SM 架构的话, 每个 SM 分成了 4 个区域, 每个区域每个时钟周期能够执行 16 个 FMA, 也就是 32 个浮点计算。一个 SM 非 TensorCore 部分, 每个时钟周期最多能够执行 128 次浮点计算。
     ![](./fig/TensorCore1.0_Volta.png)
     - CUDA 将 Tensor Core 以 Warp Level 的操作提供了 `CUDA C++ WMMA API` 对外提供, 一个 warp 可以同时操作多个 TensorCore, 来提供 `16*16*16` 的矩阵计算。
-    - 每个 Sub-Core 包含 TensorCore + FP64 + +FP32 + INT8 + 特殊函数处理单元 SFU。其中Warp Scheduler 向 Tensor Core 发送矩阵乘法GEMM(不再经过 Dispatch Unit 模块)运算指令。
+    - 每个 Sub-Core 包含 TensorCore + FP64 + +FP32 + INT8 + 特殊函数处理单元 SFU。其中 Warp Scheduler 向 Tensor Core 发送矩阵乘法GEMM(不再经过 Dispatch Unit 模块)运算指令。
     ![](./fig/volta_SM微架构.png)
     ![](./fig/volta_subCore微架构.png)
-* Turing 的第二代 TensorCore(8*8*4):
+* Turing 的第二代 TensorCore($8\times 8\times 4$):
     - 增加了 INT8 和 INT4 类型支持, 多了 FP16 fast path;
     - FP16 fast path: 在第一代 Tensor Core（如 Volta 架构）中，Tensor Core 支持 FP16 的矩阵乘法和累加操作，但其结果会使用 FP32（32 位浮点数）存储和累加。第二代 Tensor Core（如 Ampere 架构）进一步改进了这一点，增加了专门的 FP16 fast path，使得某些操作（如矩阵乘法和累加操作）在 FP16 精度下可以直接执行，不需要中间转换为 FP32。
     ![](./fig/turing_subCore微架构.png)
-* Ampere 的第三代 TensorCore(16*16*16):
+* Ampere 的第三代 TensorCore($16 \times 16 \times 16$):
     - 提供异步拷贝机制(软件层的异步拷贝机制); 前两代的 TensorCore, 数据的流通是 `DRAM->L2->L1->RF->SMEM->RF`(必须先把数据加载到寄存器, 然后再写入共享内存中)。Ampere 架构提供了异步的内存拷贝机制, 实现全局内存不经过寄存器直接到共享内存的数据加载。
     - 在 Volta 架构的 TensorCore 中, 将一个 warp 分成若干个组(每 8 个为一组, 彼此共享数据); Ampere 架构中一个 warp 不再分组, 整个 warp 中 32 个线程都可以共享数据。Ampere 架构的 Tensor Core 允许一个 warp 内的所有 32 个线程更自由、广泛地交换和共享数据, 从而在矩阵计算中实现更高的并行度和效率, 减少了线程间通信和数据传递的开销。
-    - 引入 TF32, BF16 的支持。
+    - 引入 TF32, BF16 的支持。第一次使得 TensorCore 支持一个 2:4 的结构化稀疏矩阵与另一个稠密矩阵直接相乘(其实在剪枝的时候, 就会将一些矩阵中的元素置为 0, 然后矩阵就能变得很稀疏, 那么就能够加快推理速度)。
     ![](./fig/第三代TensorCore数据流动形式.png)
-* Hopper 的第四代 TensorCore(16*16*16):
+* Hopper 的第四代 TensorCore($16 \times 16 \times 16$):
     - 引入了 TMA(Tensor Memory Accelerator): 硬件的异步加载器, 全局内存中的数据可以被异步的加载到共享内存中。
     ![](./fig/hopper_SM架构.png)
     - 引入了 GPC 内部交叉通信互联网络, GPC 内的 SM 可以高效地访问彼此的共享内存, 因此 CUDA 中也引入了 `thread block Cluster` 的概念。
@@ -2306,5 +2321,5 @@ float4 rand = curand_uniform4(&state);  // 生成四个
     - 引入 FP8 的支持。
 * 历代 TensorCore 的主要提升点:
     - memory improvemnt 提高内存读写效率, 使用更高效的读写方式
-    - 提供更多的执行格式(最开始是 4*4*4 GEMM)
-    - 提供更多的 CUDA 编程模式(输入输出类型支持更多, CUDA C wmma, ptx)
+    - 提供更多的执行格式(最开始是 $4\times 4\times 4$ GEMM)
+    - 提供更多的 CUDA 编程模式(输入输出类型支持更多, CUDA C WMMA, PTX)
