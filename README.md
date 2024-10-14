@@ -1157,9 +1157,295 @@ int main()
 
     return 0;
 }
-
 ```
+* CUDA 实现 merge sort 其实省去了递归的步骤。直接从有序数组合并开始。始终都是一个线程负责两个有序数组的合并, 只不过最初的有序数组的长度为 1, 然后每次迭代都进行翻倍。注意几个特别的点:
+    - 需要一个 global memory 上与输入数组大小相等的临时空间。
+    - 每个 thread 一直都是负责两个有序数组的合并。
+    - 有序数组大小从 1 开始, 每循环一次, 有序数组大小变为原来的 2 倍, 直至有序数组的大小超过输入数组的大小, 此时数组变得完全有序。
+    - 注意 `for` 循环中每一个迭代步, 都需要停下来同步一下。
+```C++
+#include <iostream>
+#include <cuda_runtime.h>
 
+#define THREADS_PER_BLOCK 256  // 每个block中的线程数
+
+// CUDA 核函数, 并行合并两个有序的子数组
+__global__ void parallelMerge(int *arr, int *temp, int subArraySize, int n) {
+    int threadId = blockIdx.x * blockDim.x + threadIdx.x;  // 全局线程ID
+    int start = threadId * (2 * subArraySize);  // 当前线程负责的起始位置, 每个线程负责 2*subArraySize 的大小的数据
+
+    // 保证在数组边界内
+    if (start >= n) return;  // 因为 block 是向上取整分配的
+
+    // 记录负责的这部分数据起始位置和终止位置
+    int mid = min(start + subArraySize, n);      // 中间位置
+    int end = min(start + 2 * subArraySize, n);  // 结束位置
+
+    // 双指针合并两个子数组 [start, mid) 和 [mid, end)
+    int i = start, j = mid, k = start;  // k 就是记录的写到 temp 的位置
+
+    while (i < mid && j < end) {
+        if (arr[i] <= arr[j]) {
+            temp[k++] = arr[i++];
+        } else {
+            temp[k++] = arr[j++];
+        }
+    }
+
+    while (i < mid) {
+        temp[k++] = arr[i++];
+    }
+
+    while (j < end) {
+        temp[k++] = arr[j++];
+    }
+
+    // 将合并结果复制回原数组
+    for (i = start; i < end; i++) {
+        arr[i] = temp[i];
+    }
+}
+
+// 主程序
+void mergeSortParallel(int *h_arr, int n) {
+    // 设备端数组
+    int *d_arr, *d_temp;  // d_temp 是临时内存, 其实就是空间复杂度是 O(n)
+    cudaMalloc((void**)&d_arr, n * sizeof(int));
+    cudaMalloc((void**)&d_temp, n * sizeof(int));
+
+    // 复制数据到设备
+    cudaMemcpy(d_arr, h_arr, n * sizeof(int), cudaMemcpyHostToDevice);
+
+    // 确定每次合并的子数组大小, 初始为1, 逐步翻倍
+    for (int subArraySize = 1; subArraySize < n; subArraySize *= 2) {
+        // 相当于一个线程负责 2*subArraySize 大小的数据的合并, 其实是负责 2 个大小为 subArraySize 大小的数组的合并, 合并之后的结果是 2*subArraySize 的大小。
+        int numBlocks = (n + (2 * subArraySize * THREADS_PER_BLOCK) - 1) / (2 * subArraySize * THREADS_PER_BLOCK);  // 分配的块数是向上取整
+        parallelMerge<<<numBlocks, THREADS_PER_BLOCK>>>(d_arr, d_temp, subArraySize, n);
+        cudaDeviceSynchronize();  // 因为是异步执行, 所以每一次 for 循环之后都需要进行一个同步
+    }
+
+    // 复制排序结果回主机
+    cudaMemcpy(h_arr, d_arr, n * sizeof(int), cudaMemcpyDeviceToHost);
+
+    // 释放设备内存
+    cudaFree(d_arr);
+    cudaFree(d_temp);
+}
+
+int main() {
+    const int n = 100000;  // 输入数组长度
+    int* h_arr = new int[n];
+
+    // 随机初始化数据
+    for (int i = 0; i < n; i++) {
+        h_arr[i] = rand() % 1000000;
+    }
+
+    // 调用并行归并排序
+    mergeSortParallel(h_arr, n);
+
+    // 打印排序后的前 N 个元素
+    std::cout << "Sorted array (first N elements): ";
+    for (int i = 0; i < 30; i++) {
+        std::cout << h_arr[i] << " ";
+    }
+    std::cout << std::endl;
+
+    // 释放主机内存
+    delete[] h_arr;
+
+    return 0;
+}
+```
+* 两个有序数组合并成一个大的有序数组的 CUDA 加速方法: 传统的合并算法是顺序的, 因为需要比较元素按照顺序插入。为了进行并行化加速, 我们需要一种方法来将合并操作划分为多个独立的子任务, 使得每个线程块可以独立地完成其任务。比如有序数组 A 的长度为 m, 有序数组 B 的长度为 n, 所以输出数组的总长度为 `L=m+n`。设定线程的个数为 T, 每个线程需要处理的元素个数为 `chunk_size = (L+T-1)/T` (向上取整以覆盖所有元素)。
+    - 划分输出数组, 对于第 k 个 thread, 其负责的输出区间为 `[s, e)`:
+        - 起始索引, s = k * chunk_size
+        - 结束索引, e = std::min(s+chunk_size, L)
+    - 确定输入数组的划分点, 对于每个输出块, 找到在 A 和 B 中的索引 i 和 j, 使得
+        - `i+j=s`(总共跳过了 `s` 个元素);
+        - `A[i-1]<=B[j]`(如果 i>0), `B[j-1]<=A[i]`(如果 j>0); 这两个条件保证了在位置 i 和 j 处划分不会导致元素顺序错乱。
+        - 在 A 的搜索范围 `[max(0, s-n), min(s, m-1)]` 中进行搜索 i, 对于每个候选 i, 计算得到 `j=s-i`, 然后判断是否满足以上两个条件。A 的搜索范围是这样得到的, `i<=m-1` 即 i 不能超过其最大索引, 而且 `i+j=s`, 所以 `i<s` 即 i 不能超过 s。而 `s-i<=n`, 所以 `i>=s-n`。
+    - 并行合并, 每个块确定了输入数组中的 i 和 j 之后, 使用标准的合并算法, 将这两个子区间合并到输出数组的对应位置 `C[s : e)`。
+```C++
+#include <iostream>
+#include <cuda_runtime.h>
+
+#define THREADS_PER_BLOCK 256  // 每个block中的线程数
+
+// CUDA 核函数, 并行合并两个有序数组
+__global__ void parallelMerge(int *A, int m, int *B, int n, int *C) {
+    int L = m + n;
+    int totalThreads = gridDim.x * blockDim.x;  // 总线程数
+    int threadId = blockIdx.x * blockDim.x + threadIdx.x;  // 全局线程ID
+    int chunk_size = (L + totalThreads - 1) / totalThreads;  // 每个线程处理的元素数量
+    int s = threadId * chunk_size;  // 当前线程负责的输出数组起始位置
+    int e = min(s + chunk_size, L);  // 当前线程负责的输出数组结束位置
+
+    // 在 A 和 B 中寻找划分点 i 和 j
+    int i_lower = max(0, s - n);
+    int i_upper = min(s, m-1);
+    int i, j;
+
+    // 二分法查找 i 和 j
+    while (i_lower <= i_upper) {
+        i = (i_lower + i_upper) / 2;
+        j = s - i;
+
+        int A_i_1 = (i > 0) ? A[i - 1] : INT_MIN;
+        int A_i = (i < m) ? A[i] : INT_MAX;
+        int B_j_1 = (j > 0) ? B[j - 1] : INT_MIN;
+        int B_j = (j < n) ? B[j] : INT_MAX;
+
+        if (A_i_1 <= B_j && B_j_1 <= A_i) {
+            break; // 找到合适的划分点
+        } else if (A_i_1 > B_j) {
+            i_upper = i - 1;
+        } else {
+            i_lower = i + 1;
+        }
+    }
+
+    // 现在 i 和 j 是输入数组的起始位置
+    int i_start = i;
+    int j_start = s - i_start;
+
+    // 合并操作，确保只处理当前线程的输出区间 [s, e)
+    int idx = s;
+    while (i_start < m && j_start < n && idx < e) {
+        if (A[i_start] <= B[j_start]) {
+            C[idx++] = A[i_start++];
+        } else {
+            C[idx++] = B[j_start++];
+        }
+    }
+
+    while (i_start < m && idx < e) {
+        C[idx++] = A[i_start++];
+    }
+
+    while (j_start < n && idx < e) {
+        C[idx++] = B[j_start++];
+    }
+}
+
+// CPU 端的归并函数：归并两个有序数组
+void merge(int* A, int m, int* B, int n, int* C) {
+    int i = 0, j = 0, k = 0;
+
+    while (i < m && j < n) {
+        if (A[i] <= B[j]) {
+            C[k++] = A[i++];
+        } else {
+            C[k++] = B[j++];
+        }
+    }
+
+    // 复制剩余元素
+    while (i < m) {
+        C[k++] = A[i++];
+    }
+    while (j < n) {
+        C[k++] = B[j++];
+    }
+}
+
+// 递归归并排序函数
+void mergeSort(int* arr, int n) {
+    if (n <= 1) {
+        return; // 已经是有序的
+    }
+
+    int mid = n / 2;
+    int* left = new int[mid];
+    int* right = new int[n - mid];
+
+    // 分割数组
+    for (int i = 0; i < mid; i++) {
+        left[i] = arr[i];
+    }
+    for (int i = mid; i < n; i++) {
+        right[i - mid] = arr[i];
+    }
+
+    // 递归排序
+    mergeSort(left, mid);
+    mergeSort(right, n - mid);
+
+    // 归并排序
+    merge(left, mid, right, n - mid, arr);
+
+    // 释放内存
+    delete[] left;
+    delete[] right;
+}
+
+// 主程序
+int main() {
+    const int n = 100000;  // 数据量10万
+    int* h_A = new int[n];  // 数组A
+    int* h_B = new int[n];  // 数组B
+    int* h_C = new int[2 * n];  // 用于存放结果的数组C
+
+    // 初始化数据
+    for (int i = 0; i < n; i++) {
+        h_A[i] = rand() % (n * 2);  // 随机数填充数组A
+        h_B[i] = rand() % (n * 2);  // 随机数填充数组B
+    }
+
+    // CPU 归并排序
+    mergeSort(h_A, n);
+    mergeSort(h_B, n);
+
+    // 打印归并后的结果（可以去掉，避免大数据量下打印影响性能）
+    std::cout << "Array A sorted (first 10 elements): ";
+    for (int i = 0; i < 20; i++) {
+        std::cout << h_A[i] << " ";
+    }
+    std::cout << std::endl;
+
+    std::cout << "Array B sorted (first 10 elements): ";
+    for (int i = 0; i < 20; i++) {
+        std::cout << h_B[i] << " ";
+    }
+    std::cout << std::endl;
+
+    // 分配设备内存
+    int *d_A, *d_B, *d_C;
+    cudaMalloc((void**)&d_A, n * sizeof(int));
+    cudaMalloc((void**)&d_B, n * sizeof(int));
+    cudaMalloc((void**)&d_C, 2 * n * sizeof(int));
+
+    // 复制数据到设备
+    cudaMemcpy(d_A, h_A, n * sizeof(int), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_B, h_B, n * sizeof(int), cudaMemcpyHostToDevice);
+
+    // 启动 CUDA 核函数进行并行归并
+    int numBlocks = (2 * n + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK;  // 计算需要的块数
+    parallelMerge<<<numBlocks, THREADS_PER_BLOCK>>>(d_A, n, d_B, n, d_C);
+
+    // 复制结果回主机
+    cudaMemcpy(h_C, d_C, 2 * n * sizeof(int), cudaMemcpyDeviceToHost);
+
+    // 打印结果（可以去掉，避免大数据量下打印影响性能）
+    std::cout << "Merged array (first 10 elements): ";
+    for (int i = 0; i < 30; i++) {
+        std::cout << h_C[i] << " ";
+    }
+    std::cout << std::endl;
+
+    // 释放设备内存
+    cudaFree(d_A);
+    cudaFree(d_B);
+    cudaFree(d_C);
+
+    // 释放主机内存
+    delete[] h_A;
+    delete[] h_B;
+    delete[] h_C;
+
+    return 0;
+}
+```
 ## YOLOv5 推理优化
 * 预处理部分: yolov5 中的预处理主要由以下三个部分组成:  [B, srcH, srcW, srcC] -> [B, tarC, tarH, tarW]
     - Scale: 直接 Resize 和 LetterBox(保持原图比例, 将图片放到一个正方形的画布中, 多余部分用黑色填充)
@@ -1407,9 +1693,9 @@ int main() {
 
 ## Winograd 卷积计算方法 [原文](https://zhuanlan.zhihu.com/p/524344248)
 * Winograd 的核心思想是将卷积操作分解成一系列小矩阵的乘法, 通过矩阵变换和逆变换, 将卷积操作优化为`更少的乘法和更多的加法`操作。
-* Winograd 将卷积操作分解为 3 个步骤, 输入变换、权重变换、输出变换。
-    - 输入变换: 使用预定义的变换矩阵 B, 将输入特征图的块 d 进行变换, 得到变换后的输入矩阵 `V`。其实这个变换是将输入数据转换到另一个空间中, $V=B^T \cdot d \cdot B$。
+* Winograd 将卷积操作分解为 3 个步骤, 权重变换、输入变换、输出变换。
     - 权重变换: 对卷积核 g 进行类似的变化。使用另一个预定义的变换矩阵 `G` 对卷积核进行变换, 得到变换后的卷积核为 `U`。$U=G\cdot g \cdot G^T$。
+    - 输入变换: 使用预定义的变换矩阵 B, 将输入特征图的块 d 进行变换, 得到变换后的输入矩阵 `V`。其实这个变换是将输入数据转换到另一个空间中, $V=B^T \cdot d \cdot B$。
     - 变换后的输入块 U 和卷积核块 V, 在 Winograd 域中进行逐元素的相乘得到 `M`。$M=V \odot U$。
     - 输出变换, 在用一个预定义矩阵 A进行逆变换, 回到原来的空间, 得到最终的卷积输出 `Y`。$Y=A^T \cdot M \cdot A$。
     - 对所有小块的结果进行合并, 得到最终的卷积输出特征图。
@@ -1427,7 +1713,7 @@ int main() {
         - 上半部分是 weights 的转换。对卷积核中每个 $3\times 3$ 大小的矩阵都左乘 $G, 4\times 3$, 右乘 $G^T, 3\times 4$, 这操作就使得卷积核中的每个矩阵的大小变为 $4\times 4$, 此时卷积核的大小为 $OC\times IC \times 4\times 4$。然后进行一次 relayout, 将卷积核大小变成 $4\times 4\times OC \times IC$。
         - 下半部分是 输入 FeatureMap 的转换。首先将输入 FeatureMap 进行按照 $4\times 4$ 大小的 tile 进行切分, 然后每个 tile 通过 B 和 B^T 转换为 $4\times 4$ 的矩阵。此时输入矩阵的形状被切分为 $NTiles\times IC \times 4\times 4$。然后进行一次 relayout, 将输入特征图变成 $4\times 4\times IC \times NTiles$。
         - 此时权重大小为 $4\times 4\times OC \times IC$, 输入特征图大小为 $4\times 4\times IC \times NTiles$, 进行后两个维度的矩阵乘法计算, 得到最终的输出结果为 $4\times 4\times OC \times NTiles$。再使用 `A^T` 和 `A` 来进行计算, 将此时的输出结果变换为 $2\times 2\times OC \times NTiles$, 然后写入最终的结果变成 $OC\times OH \times OW$。
-        - 优化的策略有几点: 对于权重部分的转换, 其实在模型运行之前转换就可以了。对于下半部分的转换, B^TdB 的部分其实可以把所有的乘法全都省了。对于最后的 A^T 和 A 的部分也可以把所有的乘法全部省了。其实这样一算的话, 是真的把节省了大概一半的乘法运算。
+        - 优化的策略有几点: 对于权重部分的转换, 其实在模型运行之前转换就可以了。对于下半部分的转换, B^TdB 的部分其实可以把所有的乘法全都省了。对于最后的 A^T 和 A 的部分也可以把所有的乘法全部省了。其实这样一算的话, 是真的节省了大概一半的乘法运算。
     ![](./fig/winograd详细操作.png)
 * Winograd 的卷积算法的形式通常表示为 `F(m*m, n*n)`, 其中 `m` 是输出块的大小(如$2\times2$), `n` 是卷积核的大小(如 $3\times 3$)。对于任意卷积核大小为 `n*n`, 变换矩阵 `B`, `G`, `A` 是基于多项式插值的方法生成的。变换矩阵的内容可以通过特定的数学公式推导得到, 并且随着 `m` 和 `n` 的变化而不同。
 * 优点:
@@ -1836,7 +2122,7 @@ __global__ void RoPE(float *x, int batchSize, int seq_len, int num_head, int hea
 }
 ```
 ## 常量内存
-* CUDA 常量内存是 CUDA 中的一种特殊的内存类型, 专门用于存储在设备代码中的不变数据。常量内存的容量较小, 通常为 64KB, 常见的使用方法如下:
+* `CUDA 常量内存` 是 CUDA 中的一种特殊的内存类型, 专门用于存储在设备代码中的不变数据。常量内存的容量较小, 通常为 64KB, 常见的使用方法如下:
     - 定义常量内存: 通过 `__constant__` 关键字定义在设备端。
     - H2D: 在主机端通过 `cudaMemcpyToSymbol()` 从主机端将数据复制到常量内存中。
     - 在device的内核中使用: 常量内存数据只能在设备端读取, 不可修改, 用法与普通的数组一致。
@@ -1977,11 +2263,11 @@ int main(){
 ```
 
 ## 大模型采样策略
-* 在文本生成任务中, 需要让模型逐个预测每个 token, 直到达到终止条件(特殊符号或最大长度)。在每一步的预测中, 模型会给出一个概率分布(softmax), 表示它对下一个单词的预测。如何从这个概率分布中选择下一个单词, 这个就是采样策略。常见的方法有:
+* 在文本生成任务中, 需要让模型逐个预测每个 `token`, 直到达到终止条件(特殊符号或最大长度)。在每一步的预测中, 模型会给出一个概率分布(softmax), 表示它对下一个单词的预测。如何从这个概率分布中选择下一个单词, 这个就是采样策略。常见的方法有:
     - 贪心策略: 直接选取概率最高的单词。简单高效, 但是会导致生成的文本过于单调和重复。
     - 随机采样(top-k 和 top-p): 按照概率分布随机选择一个单词。增加生成的多样性, 可能会导致文本不连贯和无意义。
     - Beam Search: 维护大小为 k 的候选序列集合, 每一步都从每个候选序列的概率分布中选择概率最高的 k 个单词, 然后保留总概率最高的 k 个候选序列。可以平衡生成质量和多样性, 但是可能导致生成的文本过于保守和不自然。
-* top-k 和 top-p 均是依概率分布进行选择, 但是其选择的范围并不是所有是 token。其均是先依据概率对 token 进行排序, top-k 是从前 k 个 token 中以概率选取, top-p 是先排序后的概率累加和, 选取概率累加和刚好超过 p 的所有 token, 然后在这里进行依概率选取。
+* `top-k` 和 `top-p` 均是依概率分布进行选择, 但是其选择的范围并不是所有是 token。其均是先依据概率对 token 进行排序, top-k 是从前 k 个 token 中以概率选取, top-p 是先排序后的概率累加和, 选取概率累加和刚好超过 p 的所有 token, 然后在这里进行依概率选取。
 * 以下是 `top-k` 的 `Python` 代码:
 ```Python
 # k 越大，生成的多样性越高，但是生成的质量越低；k 越小，生成的质量越高，但是生成的多样性越低
@@ -1993,7 +2279,7 @@ def top_k_sampling(logits, k):
     从给定的 logits 中使用 Top-k 采样策略选择下一个词的索引。
 
     参数：
-    - logits: 张量，形状为 (vocab_size,) 这个是 softmax 之后输出的概率分布
+    - logits: 张量, 形状为 (vocab_size,) 这个是 softmax 之后输出的概率分布
     - k: 整数, 表示选择概率最高的前 k 个词
 
     返回：
@@ -2140,10 +2426,10 @@ import torch.nn as nn
 class DropOut(nn.Module):
     def __init__(self, p=0.5):
         """
-        自定义的 DropOut 类，用于实现 Dropout 正则化，不使用 torch.bernoulli。
+        自定义的 DropOut 类，用于实现 Dropout 正则化
 
         参数：
-        - p: 进行 dropout 的概率，默认为 0.5。
+        - p: 进行 dropout 的概率，默认为 0.5
         """
         super(DropOut, self).__init__()
         if p < 0 or p > 1:
@@ -2284,7 +2570,7 @@ float4 rand = curand_uniform4(&state);  // 生成四个
     ![](./fig/Ampere架构.png)
     ![](./fig/TensorCore支持稀疏矩阵乘法.png)
 * 认识下 SM 中各个结构的功能:
-    - 经常说的 L1 Cache 与 Shared Memory 是共享内存的, 其实值的是 L1 Data Cache(L1 Cache 由 L1 Data Cache 和 L1 Instruction Cache 两部分组成)
+    - 经常说的 L1 Cache 与 Shared Memory 是共享内存的, 其实指的是 L1 Data Cache(L1 Cache 由 L1 Data Cache 和 L1 Instruction Cache 两部分组成)
     - 其中的 warp Scheduler(warp 调度器) 与 Dispatch Unit(指派单元) 是用于管理和调度并行线程执行的关键组件。
         * warp scheduler: 一个 SM 通常配备有多个调度器, 每个调度器负责在一个时钟周期内选择一个或者多个 warp。warp sceduler 依据当前执行状态, 数据依赖性, 资源可用性选择当前可以执行的 warp。如果一个 Warp 正在等待数据，例如因为内存访问延迟，Warp Scheduler 会将其他准备好执行的 Warp 进行调度，从而隐藏延迟。
         * Dispatch Unit: 将已被 warp scheduler 选中的 warp 发送到相应的执行单元(其实就是 FP32 Core, INT32 Core 这些组件)。一旦 Warp Scheduler 选择了要执行的 Warp, Dispatch Unit 会根据指令的类型将其派发到相应的硬件资源中。例如, 整数计算会派发到整数执行单元, 浮点计算则派发到浮点执行单元。
@@ -2298,7 +2584,7 @@ float4 rand = curand_uniform4(&state);  // 生成四个
 ## TensorCore 的发展历程
 * 混合精度是指在底层硬件算子层面, 使用 FP16 做为输入和输出训练, 使用全精度(FP32) 进行中间结果计算而不损失过多精度的技术。
 * Volta 的第一代 TensorCore($4\times 4\times 4$): 
-    - 每个 TensorCore 每个时钟周期能够执行 `4*4*4` GEMM, 64 个 FMA, 执行计算 `D=A*B+C`, 其中 A, B, C, D 均是 `4*4` 的矩阵。A 和 B 是 FP16 矩阵, 累加矩阵 C 和 D 是 FP16 或 FP32 矩阵。其中每个 SM 上有 8 个 TensorCore, 那么一个时钟周期就能够执行 512 个浮点计算。其实对应到这一代 SM 架构的话, 每个 SM 分成了 4 个区域, 每个区域每个时钟周期能够执行 16 个 FMA, 也就是 32 个浮点计算。一个 SM 非 TensorCore 部分, 每个时钟周期最多能够执行 128 次浮点计算。
+    - 每个 TensorCore 每个时钟周期能够执行 `4*4*4` GEMM, 64 个 FMA, 执行计算 `D=A*B+C`, 其中 A, B, C, D 均是 `4*4` 的矩阵。A 和 B 是 FP16 矩阵, 累加矩阵 C 和 D 是 FP16 或 FP32 矩阵。其中每个 SM 上有 8 个 TensorCore, 那么一个时钟周期就能够执行 512 个浮点计算。其实对应到这一代 SM 架构的话, 每个 SM 分成了 4 个区域, 每个区域每个时钟周期能够执行 64 个 FMA, 也就是 128 个浮点计算。一个 SM 非 TensorCore 部分, 每个时钟周期最多能够执行 128 次浮点计算。
     ![](./fig/TensorCore1.0_Volta.png)
     - CUDA 将 Tensor Core 以 Warp Level 的操作提供了 `CUDA C++ WMMA API` 对外提供, 一个 warp 可以同时操作多个 TensorCore, 来提供 `16*16*16` 的矩阵计算。
     - 每个 Sub-Core 包含 TensorCore + FP64 + +FP32 + INT8 + 特殊函数处理单元 SFU。其中 Warp Scheduler 向 Tensor Core 发送矩阵乘法GEMM(不再经过 Dispatch Unit 模块)运算指令。
