@@ -786,7 +786,7 @@ std::cout << "multiple stream letancy: " << letancy << " ms" << std::endl;
     - 调整了内外循环，Q 为外层循环，KV为内存循环。通过此种做法减少在 shared memory 上的读写次数。
     - 如果一个 Block 处于矩阵上三角部分，不进行 attention 计算。
 
-## radix_sort 优化(GTC 2020, 在2009年牛津大学的一篇论文上改进的)
+## radix sort 优化(GTC 2020, 在2009年牛津大学的一篇论文上改进的)
 ### cpu 端写法
 * 基数排序(radix sort) 属于分配式排序, 又称 bin sort。透过键值的部分信息, 将要排序得元素分配到某些桶中, 达到排序的作用。基数排序法的效率高于其他稳定性的排序算法。
 * 基数排序是一种`非比较型整数`排序算法，其原理是将整数按位数切割成不同的数字，然后按每个位数分别比较。由于整数也可以表达字符串（比如名字或日期）和特定格式的浮点数，所以基数排序也不是只能使用于整数。
@@ -1158,7 +1158,7 @@ int main()
     return 0;
 }
 ```
-* CUDA 实现 merge sort 其实省去了递归的步骤。直接从有序数组合并开始。始终都是一个线程负责两个有序数组的合并, 只不过最初的有序数组的长度为 1, 然后每次迭代都进行翻倍。注意几个特别的点:
+* CUDA 实现 `merge sort` 其实省去了递归的步骤。直接从有序数组合并开始。始终都是一个线程负责两个有序数组的合并, 只不过最初的有序数组的长度为 1, 然后每次迭代都进行翻倍。注意几个特别的点:
     - 需要一个 global memory 上与输入数组大小相等的临时空间。
     - 每个 thread 一直都是负责两个有序数组的合并。
     - 有序数组大小从 1 开始, 每循环一次, 有序数组大小变为原来的 2 倍, 直至有序数组的大小超过输入数组的大小, 此时数组变得完全有序。
@@ -1447,7 +1447,7 @@ int main() {
 }
 ```
 ## YOLOv5 推理优化
-* 预处理部分: yolov5 中的预处理主要由以下三个部分组成:  [B, srcH, srcW, srcC] -> [B, tarC, tarH, tarW]
+* 预处理部分: yolov5 中的预处理主要由以下三个部分组成: `[B, srcH, srcW, srcC] -> [B, tarC, tarH, tarW]`
     - Scale: 直接 Resize 和 LetterBox(保持原图比例, 将图片放到一个正方形的画布中, 多余部分用黑色填充)
     - Normalization: 归一化, 将像素值(unsigned char)缩放到 [0, 1] 间。
     - BGR2RGB: 颜色通道顺序调整。
@@ -1460,7 +1460,7 @@ int main() {
 * 后处理部分: yolov5 COCO 预训练模型导出 ONNX, 可以查看到 3 个 head(shape 分别是 [255, 80, 80], [255, 40, 40], [255, 20, 20]), 经过 decode 得到最终的输出 output([25200, 85]), 再经过 NMS 就可以得到最终的检测框。一共是 9 个 anchor, 每个 head 对应 3 种 anchor。所以是 [255, 80, 80] 可以转换为 [3, 85, 80, 80]([3, (tx, ty, tw, th, score, [0, 0, 1,...,0,0,0]), 80, 80])。
 * 对后处理优化是思路是:
     - 先循环特征图, 然后再循环head。相当于最后的结果为 [batch1_layer1, batch2_layer1, batch1_layer2, batch2_layer2, batch1_layer3, batch2_layer3]
-    - 线程组织形式是, `dim3 block(16, 16, 1);  dim3 grid(featureW/block.x, featureH/block.y, numAnchors/block.z);  numAnchors 是每个 head 对应的 anchor 个数`
+    - 线程组织形式是, `dim3 block(16, 16, 1);  dim3 grid(featureW/block.x, featureH/block.y, numAnchors/block.z);  numAnchors 是每个 head 对应的 anchor 个数`。
     - kernel 的逻辑是: 依据每个位置对应的 score, 确定是否要处理, 处理的话就让原子操作 value + 1; 处理的话, 就是取得其在网格中的 x, y 和 对应 anchor 长宽和缩放比例来处理; 每个线程还要进行一次排序, 找到最大的类别是什么; 最后依据原子操作的值, 将其放到对应的位置。
 
 ## 全局内存管理
@@ -1672,7 +1672,7 @@ int main() {
     - padding-free 的方法, 将变长的输入张量打包, 并计算 bach_seq_offset 和 wordIdx, 避免填充和 padding token 的计算。
     - 融合 MHA(Multi-Head Attention), 减少 MHA 中间矩阵的内存开销, 也利用 WMMA 使用 TensorCore 进行加速。
 * paddfing-free:
-    - 在整个 Transformer 的结构中, 其实只有在进行求 $softmax(Q\times K^{T})\times V$ 的时候才要求多个 batch 中的句子长度是对齐的, 所以可以在计算这个之前进行 `fused rebuild padding & add bias`, 这里是 fused 是因为为了减小这个操作的影响, 将其与其他的操作进行融合。attention 运算完成之后, 再利用 `fused zero padding & transpose` 来去除 padding, 这里能够融合 transpose 是因为调用的 cublas 是列主序的(内存一定, 列主序就是行主序的转置)。
+    - 在整个 Transformer 的结构中, 其实只有在进行求 $softmax(\frac{Q\times K^{T}}{\sqrt{d}})\times V$ 的时候才要求多个 batch 中的句子长度是对齐的, 所以可以在计算这个之前进行 `fused rebuild padding & add bias`, 这里是 fused 是因为为了减小这个操作的影响, 将其与其他的操作进行融合。attention 运算完成之后, 再利用 `fused zero padding & transpose` 来去除 padding, 这里能够融合 transpose 是因为调用的 cublas 是列主序的(内存一定, 列主序就是行主序的转置)。
 * 融合 MHA:
     - 整体思路是依据 `seq_len` 的大小来分别撰写不同的 kernel 来减少中间矩阵的存储。当 `seq_len<80` 时(80应该是依据硬件的 shared_memory 的大小得来的), 将 Q, K, V 全部加载到 shared_memory 中, 利用 WMMA 来调用 TensorCore 来加快 attention 的计算, V 复用 K 的shared_memory。当 `seq_len > 80` 时, 分段将 Q 加载到 shared_memory, K 仍然是全部加载, V 复用 K 的 shared_memory。
 
